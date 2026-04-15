@@ -806,3 +806,156 @@ MIT License — free to use, modify, and distribute.
 ---
 
 *Built with ❤️ using LangGraph + AWS Bedrock + Streamlit*
+
+---
+
+## 🖥️ EC2 Access & Operations Cheat Sheet
+
+Everything you need to know to access, run, and manage the app on EC2 after initial deployment.
+
+---
+
+### Connect to EC2 from Your Mac
+
+```bash
+ssh -i ~/Desktop/Github_Project/redshift-bedrock-ai/credentials/redshift-ai-key.pem ubuntu@54.145.204.225
+```
+
+> Replace `54.145.204.225` with your actual EC2 Public IP.
+> Find it at: AWS Console → EC2 → Instances → your instance → Public IPv4 address
+
+---
+
+### After SSH — What Happens Automatically
+
+Once you SSH in, `.bashrc` automatically:
+- ✅ Navigates to `/home/ubuntu/redshift-bedrock-ai`
+- ✅ Activates the Python virtual environment `(venv)`
+
+Your prompt will look like:
+```
+(venv) ubuntu@ip-172-31-45-254:~/redshift-bedrock-ai$
+```
+
+---
+
+### Start the App
+
+```bash
+streamlit run app.py --server.port 8501 --server.address 0.0.0.0
+```
+
+Then open in your browser:
+```
+http://54.145.204.225:8501
+```
+
+---
+
+### Keep App Running After SSH Disconnect
+
+By default the app stops when you close SSH. Use `screen`:
+
+```bash
+# Start a screen session
+screen -S redshift-ai
+
+# Run the app inside screen
+streamlit run app.py --server.port 8501 --server.address 0.0.0.0
+
+# Detach — app keeps running in background
+# Press: Ctrl+A then D
+```
+
+---
+
+### Reattach to Running App
+
+```bash
+# Check if app is running
+screen -ls
+
+# Reattach
+screen -r redshift-ai
+
+# Detach again without stopping
+# Press: Ctrl+A then D
+
+# Stop the app
+# Press: Ctrl+C
+```
+
+---
+
+### Pull Latest Code from GitHub and Restart
+
+```bash
+git pull
+screen -r redshift-ai
+# Press Ctrl+C to stop
+streamlit run app.py --server.port 8501 --server.address 0.0.0.0
+# Press Ctrl+A then D to detach
+```
+
+---
+
+### If EC2 Was Stopped and Restarted
+
+⚠️ EC2 Public IP changes every time the instance is stopped and restarted.
+
+```bash
+# 1. Get new IP: AWS Console → EC2 → Instances → Public IPv4
+# 2. SSH with new IP
+ssh -i credentials/redshift-ai-key.pem ubuntu@NEW_IP
+
+# 3. Start app
+streamlit run app.py --server.port 8501 --server.address 0.0.0.0
+
+# 4. Access at: http://NEW_IP:8501
+```
+
+To avoid IP changing — allocate an **Elastic IP** in AWS Console (free while instance is running).
+
+---
+
+### Verify Everything is Working
+
+```bash
+# Check venv is active
+which python3
+# Should show: /home/ubuntu/redshift-bedrock-ai/venv/bin/python3
+
+# Check .env values are loaded
+python3 -c "
+from dotenv import load_dotenv
+import os
+load_dotenv()
+print('DB_USER       :', os.getenv('DB_USER', 'NOT SET'))
+print('AWS_REGION    :', os.getenv('AWS_REGION', 'NOT SET'))
+print('AWS KEY       :', 'SET ✅' if os.getenv('AWS_ACCESS_KEY_ID') else 'NOT SET ❌')
+print('AWS SECRET    :', 'SET ✅' if os.getenv('AWS_SECRET_ACCESS_KEY') else 'NOT SET ❌')
+print('BEDROCK MODEL :', os.getenv('BEDROCK_MODEL_ID', 'NOT SET'))
+print('GUARDRAIL ID  :', 'SET ✅' if os.getenv('BEDROCK_GUARDRAIL_ID') else 'NOT SET ❌')
+"
+
+# Check packages
+pip list | grep -E "langchain|boto3|streamlit|chromadb"
+```
+
+---
+
+### 📋 Quick Reference Card — Save This!
+
+| Task | Command |
+|---|---|
+| **Connect to EC2** | `ssh -i credentials/redshift-ai-key.pem ubuntu@YOUR_IP` |
+| **Start app** | `streamlit run app.py --server.port 8501 --server.address 0.0.0.0` |
+| **Start with screen** | `screen -S redshift-ai` then start app |
+| **Detach screen** | `Ctrl+A` then `D` |
+| **Reattach screen** | `screen -r redshift-ai` |
+| **Pull latest code** | `git pull` |
+| **Edit .env** | `nano .env` |
+| **Run AWS setup** | `python3 setup_bedrock.py` |
+| **Check packages** | `pip list` |
+| **Stop app** | `Ctrl+C` inside screen |
+| **Access app** | `http://YOUR_EC2_IP:8501` |
