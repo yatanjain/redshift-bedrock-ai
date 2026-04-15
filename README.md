@@ -959,3 +959,149 @@ pip list | grep -E "langchain|boto3|streamlit|chromadb"
 | **Check packages** | `pip list` |
 | **Stop app** | `Ctrl+C` inside screen |
 | **Access app** | `http://YOUR_EC2_IP:8501` |
+
+---
+
+## 🔄 POC Session Guide — Start & Stop Procedure
+
+Since this is a POC and you stop the EC2 instance when not in use, follow these exact steps every time.
+
+> ⚠️ **Important:** EC2 Public IP changes every time you stop and start the instance. Always get the new IP from AWS Console first.
+
+---
+
+### 🟢 Starting a Session (Every Time)
+
+#### Step 1 — Start EC2 Instance
+1. Go to **AWS Console → EC2 → Instances**
+2. Select `redshift-ai-server`
+3. Click **Instance state → Start instance**
+4. Wait until **Instance state = Running** ✅ (takes ~1 minute)
+5. Copy the new **Public IPv4 address** — e.g. `54.123.45.67`
+   > This IP changes every time — always get fresh one from console
+
+---
+
+#### Step 2 — SSH into EC2
+
+```bash
+# On your Mac terminal — replace IP with new one from Step 1
+ssh -i ~/Desktop/Github_Project/redshift-bedrock-ai/credentials/redshift-ai-key.pem ubuntu@NEW_IP
+```
+
+Your prompt should show:
+```
+(venv) ubuntu@ip-172-31-45-254:~/redshift-bedrock-ai$
+```
+
+If `(venv)` is missing — run:
+```bash
+cd ~/redshift-bedrock-ai
+source venv/bin/activate
+```
+
+---
+
+#### Step 3 — Kill Any Old Streamlit Process
+
+```bash
+pkill -f streamlit
+```
+
+> Always run this — prevents port 8501 conflict from previous session
+
+---
+
+#### Step 4 — Start the App
+
+```bash
+streamlit run app.py --server.port 8501 --server.address 0.0.0.0
+```
+
+---
+
+#### Step 5 — Open in Browser
+
+```
+http://NEW_EC2_IP:8501
+```
+
+> Use Chrome — Safari caches old IPs and may not load correctly
+
+---
+
+### 🔴 Ending a Session (Every Time)
+
+#### Step 1 — Stop the App
+```bash
+# In EC2 terminal
+Ctrl+C
+```
+
+#### Step 2 — Exit SSH
+```bash
+exit
+```
+
+#### Step 3 — Stop EC2 Instance
+1. AWS Console → EC2 → Instances
+2. Select `redshift-ai-server`
+3. Click **Instance state → Stop instance**
+4. Wait until **Instance state = Stopped** ✅
+
+> Stopping saves your free tier hours and avoids unnecessary costs
+
+---
+
+### 🔁 Full Session Checklist
+
+```
+STARTING:
+  □ 1. Start EC2 instance in AWS Console
+  □ 2. Copy new Public IPv4 address
+  □ 3. SSH into EC2 with new IP
+  □ 4. Verify (venv) is active
+  □ 5. Run: pkill -f streamlit
+  □ 6. Run: streamlit run app.py --server.port 8501 --server.address 0.0.0.0
+  □ 7. Open Chrome → http://NEW_IP:8501
+
+ENDING:
+  □ 1. Press Ctrl+C to stop app
+  □ 2. Type exit to close SSH
+  □ 3. Stop EC2 instance in AWS Console
+```
+
+---
+
+### 🚨 Common Issues When Restarting
+
+**App not loading in browser**
+```bash
+# Kill old process and restart
+pkill -f streamlit
+streamlit run app.py --server.port 8501 --server.address 0.0.0.0
+```
+
+**venv not active — streamlit command not found**
+```bash
+cd ~/redshift-bedrock-ai
+source venv/bin/activate
+streamlit run app.py --server.port 8501 --server.address 0.0.0.0
+```
+
+**Port 8501 already in use**
+```bash
+sudo lsof -i :8501          # find process ID
+sudo kill -9 PID            # kill it
+streamlit run app.py --server.port 8501 --server.address 0.0.0.0
+```
+
+**Wrong IP in browser — page not loading**
+- Get new IP from AWS Console → EC2 → Instances → Public IPv4
+- Open Chrome (not Safari) → `http://NEW_IP:8501`
+
+**AWS credentials error after restart**
+```bash
+# Verify .env is correct
+cat .env | grep AWS
+```
