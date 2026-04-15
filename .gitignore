@@ -1,0 +1,115 @@
+# ═══════════════════════════════════════════════════════════════════
+#  .gitignore — Files that should NEVER be committed to GitHub
+#
+#  MOST IMPORTANT: .env contains your AWS keys.
+#  If committed, bots scan GitHub 24/7 and will find them in minutes.
+#  AWS will charge YOUR account for whatever they spin up.
+# ═══════════════════════════════════════════════════════════════════
+
+
+# ── SECRETS — NEVER commit these ─────────────────────────────────
+.env
+.env.local
+.env.production
+.env.staging
+*.env
+
+
+# AWS credential files
+.aws/
+aws_credentials.json
+
+
+# ── DATABASE — auto-generated, no need to commit ─────────────────
+*.db
+*.sqlite
+*.sqlite3
+poc_database.db
+
+
+# ── PYTHON ───────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+.Python
+
+# Virtual environments — each developer creates their own
+venv/
+env/
+.venv/
+.env/
+ENV/
+env.bak/
+venv.bak/
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+*.egg
+.eggs/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+
+# ── VS CODE ───────────────────────────────────────────────────────
+# Exclude workspace settings (may contain local paths/secrets)
+.vscode/
+*.code-workspace
+# Keep: .vscode/extensions.json (team extension recommendations)
+!.vscode/extensions.json
+
+
+# ── OTHER IDEs ────────────────────────────────────────────────────
+.idea/
+*.swp
+*.swo
+*~
+*.sublime-project
+*.sublime-workspace
+
+
+# ── OS FILES ─────────────────────────────────────────────────────
+.DS_Store           # Mac
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db           # Windows
+ehthumbs.db
+Desktop.ini
+
+
+# ── LOGS ─────────────────────────────────────────────────────────
+*.log
+logs/
+*.out
+
+
+# ── CHROMADB — local vector store, auto-rebuilt ──────────────────
+chroma/
+chroma_db/
+.chroma/
+
+
+# ── JUPYTER ──────────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb
+
+
+# ── MISC ─────────────────────────────────────────────────────────
+*.bak
+*.tmp
+*.temp
+.cache/
+
+# ── CREDENTIALS FOLDER — NEVER commit to GitHub ──────────────
+credentials/
+*.pem
+*.csv
