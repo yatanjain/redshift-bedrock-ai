@@ -39,7 +39,6 @@ EMBED_MODEL = "amazon.titan-embed-text-v2:0"
 # Free, no setup needed
 # Note: in-memory = rebuilt on every app restart
 # For production: use chromadb.PersistentClient(path="./chroma_db")
-# For production: use chromadb.PersistentClient(path="./chroma_db")
 
 # ── ChromaDB client — single shared client ────────────────────
 # Collections are per-user (see _schema_collections below)
