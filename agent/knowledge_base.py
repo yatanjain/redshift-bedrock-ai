@@ -415,6 +415,8 @@ def _embed_text(text: str) -> list:
         contentType = "application/json",
         accept      = "application/json",
     )
+    result = json.loads(response["body"].read())
+    return result["embedding"]
 
 
 # ══════════════════════════════════════════════════════════════
@@ -477,10 +479,16 @@ def build_schema_index(use_auto: bool = True, username: str = "default_user"):
 
     for doc in documents:
         print(f"   Embedding: {doc['id']}...")
-        embedding = _embed_text(doc["content"])
-        embeddings.append(embedding)
-        documents_text.append(doc["content"])
-        ids.append(doc["id"])
+        try:
+            embedding = _embed_text(doc["content"])
+            embeddings.append(embedding)
+            documents_text.append(doc["content"])
+            ids.append(doc["id"])
+            print(f"   ✅ {doc['id']} embedded ({len(embedding)} dims)")
+        except Exception as e:
+            print(f"   ❌ Failed to embed {doc['id']}: {str(e)}")
+            # Skip failed doc — don't add None to list
+            continue
 
     # Store in user-specific ChromaDB collection
     collection.add(
