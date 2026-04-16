@@ -960,6 +960,288 @@ pip list | grep -E "langchain|boto3|streamlit|chromadb"
 | **Stop app** | `Ctrl+C` inside screen |
 | **Access app** | `http://YOUR_EC2_IP:8501` |
 
+
+---
+
+<!--
+════════════════════════════════════════════════════════════════
+  💡 CONCEPT SECTION — For Learning & Understanding
+  These sections explain HOW things work conceptually.
+  They are NOT part of the actual codebase.
+  Read these to deeply understand the project before the article.
+════════════════════════════════════════════════════════════════
+-->
+
+> ## 🟡 CONCEPT SECTIONS BELOW
+> The sections marked with 🟡 are **for learning and understanding only** — they explain concepts behind the code but are not part of the actual codebase. Read them to deeply understand the project before writing your article.
+
+---
+
+## 🟡 CONCEPT — What Enables SQL Understanding — Layer by Layer
+
+> 💡 **This is a concept explanation — not actual code.** Read this to understand HOW the project generates accurate SQL from plain English.
+
+---
+
+### The Common Misconception
+
+Most people think there is one specific "SQL tool" that understands SQL. There isn't. SQL understanding comes from **5 layers working together** — remove any one layer and the SQL quality degrades significantly.
+
+---
+
+### The 5 Layers
+
+```
+User asks: "Show me total revenue by region"
+                    ↓
+┌─────────────────────────────────────────────┐
+│  LAYER 1 — Claude Haiku 4.5 (Bedrock)       │
+│                                             │
+│  The LLM itself understands SQL natively.   │
+│  Trained on millions of SQL queries.        │
+│  Knows SELECT, JOIN, GROUP BY, SUM etc.     │
+│                                             │
+│  ✅ Provides: SQL syntax knowledge          │
+│  ❌ Missing:  YOUR specific schema          │
+└──────────────────────┬──────────────────────┘
+                       ↓
+┌─────────────────────────────────────────────┐
+│  LAYER 2 — knowledge_base.py (RAG)          │
+│                                             │
+│  Tells Claude WHICH tables/columns exist.   │
+│  "orders table has total_amount, region"    │
+│  Without this — Claude guesses column names │
+│  and hallucinates schema.                   │
+│                                             │
+│  ✅ Provides: YOUR exact schema             │
+│  ❌ Missing:  SQL generation ability        │
+└──────────────────────┬──────────────────────┘
+                       ↓
+┌─────────────────────────────────────────────┐
+│  LAYER 3 — System Prompt (agent.py)         │
+│                                             │
+│  Rules that guide Claude's behavior:        │
+│  "Use tool_run_join for JOINs"              │
+│  "Use tool_run_aggregation for GROUP BY"    │
+│  "Always add LIMIT"                         │
+│  "Use table aliases in JOINs"              │
+│                                             │
+│  ✅ Provides: Behavioral rules              │
+│  ❌ Missing:  Schema knowledge              │
+└──────────────────────┬──────────────────────┘
+                       ↓
+┌─────────────────────────────────────────────┐
+│  LAYER 4 — Tool Descriptions (agent.py)     │
+│                                             │
+│  Each @tool has a natural language desc:    │
+│  "Use tool_run_join when query involves     │
+│   JOIN across multiple tables"              │
+│                                             │
+│  Claude reads these to decide WHICH tool    │
+│  to call for each specific query type.      │
+│                                             │
+│  ✅ Provides: Tool routing guidance         │
+└──────────────────────┬──────────────────────┘
+                       ↓
+┌─────────────────────────────────────────────┐
+│  LAYER 5 — tools.py (Execution)             │
+│                                             │
+│  Actually RUNS the SQL Claude generated.    │
+│  Validates SELECT-only security.            │
+│  Returns formatted results to user.         │
+│                                             │
+│  ✅ Provides: SQL execution                 │
+│  ❌ Does NOT understand SQL itself          │
+└─────────────────────────────────────────────┘
+```
+
+---
+
+### Each Layer's Contribution
+
+| Layer | File | SQL Role | Understands SQL? |
+|---|---|---|---|
+| Claude Haiku 4.5 | Bedrock API | Generates SQL from natural language | ✅ Yes — pre-trained on SQL |
+| RAG | `knowledge_base.py` | Provides correct table/column names | ❌ No — just text retrieval |
+| System Prompt | `agent.py` | Rules for which tool to use | ❌ No — just instructions |
+| Tool descriptions | `agent.py` | Guides tool selection | ❌ No — just metadata |
+| SQL execution | `tools.py` | Runs the SQL | ❌ No — just executes |
+
+---
+
+### Why Claude + RAG Together is the Key
+
+```
+Claude alone:
+  ✅ Knows SQL syntax perfectly
+  ❌ Doesn't know YOUR table names
+  ❌ May hallucinate column names
+  Result: Wrong SQL
+
+RAG alone:
+  ✅ Knows your exact schema
+  ❌ Cannot generate SQL
+  ❌ Cannot understand language
+  Result: No SQL
+
+Claude + RAG together:
+  ✅ Knows SQL syntax
+  ✅ Knows YOUR exact schema
+  ✅ Never hallucinates column names
+  Result: Accurate SQL every time ✅
+```
+
+---
+
+### Real World Analogy
+
+| Component | Real World Equivalent |
+|---|---|
+| **Claude** | Brilliant SQL expert — knows SQL perfectly but doesn't know your business |
+| **RAG** | Onboarding document — teaches the expert your specific tables |
+| **System Prompt** | Manager's rules — "always use JOINs this way, never modify data" |
+| **Tool descriptions** | Job description — "use this tool for aggregations, that one for JOINs" |
+| **tools.py** | Database access — actually runs the queries |
+| **Guardrails** | HR policy — blocks anything that violates company rules |
+
+> **Key insight for your article:** There is no single "SQL understanding tool" — it's Claude's pre-trained SQL knowledge combined with RAG's schema context that enables accurate SQL generation. This is the core architecture insight most tutorials miss.
+
+---
+
+## 🟡 CONCEPT — Automated Schema Generation for Large Databases
+
+> 💡 **This is a concept explanation** — the actual implementation is in `agent/knowledge_base.py` → `auto_generate_schema_documents()`
+
+---
+
+### The Problem with Manual Schema Documents
+
+Our original `SCHEMA_DOCUMENTS` were manually written — fine for 5 tables but impossible for real enterprise databases with 300-400 tables.
+
+```
+5 tables   → manual writing: 30 minutes ✅ feasible
+50 tables  → manual writing: 5 hours    ⚠️ painful
+400 tables → manual writing: 40 hours   ❌ impossible
+```
+
+---
+
+### The Auto-Generation Solution
+
+`auto_generate_schema_documents()` reads directly from the database and builds schema documents automatically:
+
+```
+Database
+    ↓
+Read all table names
+    ↓
+For each table:
+  → Read all column names + types
+  → Read primary keys
+  → Read foreign key relationships
+  → Count rows
+  → Infer query patterns from column names
+    ↓
+Generate plain English description
+    ↓
+Embed with Titan → Store in ChromaDB
+```
+
+---
+
+### What Gets Auto-Generated Per Table
+
+```
+Table: orders
+Row count: 15
+
+Columns:
+  - order_id      INTEGER      NOT NULL (PRIMARY KEY)
+  - customer_id   INTEGER      NOT NULL
+  - total_amount  REAL         NULLABLE
+  - region        TEXT         NULLABLE
+  - status        TEXT         NULLABLE
+
+Foreign Keys (this table references):
+  - orders.customer_id → customers.customer_id
+
+Referenced by (other tables JOIN here):
+  - order_returns.order_id → orders.order_id
+
+Common query patterns: date range filters, filter by status,
+revenue and financial aggregations, geographic analysis,
+JOIN with related tables
+```
+
+---
+
+### How to Scale for 300-400 Tables
+
+The same `auto_generate_schema_documents()` function handles any number of tables. For very large databases:
+
+| Strategy | When to Use | How |
+|---|---|---|
+| **Auto-generate all** | Up to ~100 tables | Default behavior |
+| **Filter important tables** | 100-500 tables | Add WHERE clause to filter by row count, last accessed |
+| **Batch processing** | Any size | Process 50 tables at a time |
+| **Bedrock Knowledge Bases** | Enterprise 500+ | Managed AWS service with S3 sync |
+
+---
+
+### Redshift vs SQLite Query Difference
+
+The auto-generation uses SQLite-specific queries for POC. For production Redshift, replace with:
+
+```python
+# SQLite (POC)
+cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+cursor.execute(f"PRAGMA table_info({table})")
+
+# Redshift (Production)
+cursor.execute("""
+    SELECT table_name
+    FROM information_schema.tables
+    WHERE table_schema = 'public'
+    ORDER BY table_name
+""")
+cursor.execute("""
+    SELECT column_name, data_type, is_nullable,
+           character_maximum_length
+    FROM information_schema.columns
+    WHERE table_name = %s
+    AND table_schema = 'public'
+    ORDER BY ordinal_position
+""", (table,))
+```
+
+---
+
+## 🟢 CODE — Automated Schema Generation
+
+> ✅ **This IS actual code** — implemented in `agent/knowledge_base.py`
+
+The file now has two modes:
+
+```python
+# AUTO mode — reads from database (default, recommended)
+build_schema_index(use_auto=True)
+
+# MANUAL mode — uses hardcoded SCHEMA_DOCUMENTS (fallback)
+build_schema_index(use_auto=False)
+
+# Force rebuild when new tables added
+rebuild_index()
+```
+
+Key functions added:
+
+| Function | What It Does |
+|---|---|
+| `auto_generate_schema_documents()` | Reads all tables from DB, builds schema docs automatically |
+| `_generate_join_patterns_doc()` | Auto-generates JOIN examples from FK relationships |
+| `rebuild_index()` | Force rebuilds index when schema changes |
+| `build_schema_index(use_auto=True)` | Updated to support both auto and manual modes |
+
 ---
 
 ---

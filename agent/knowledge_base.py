@@ -2,16 +2,20 @@
 agent/knowledge_base.py — Bedrock Titan Embeddings + Schema RAG
 
 What this does:
-  1. Takes all your table schemas (DDL + descriptions)
+  1. AUTO-GENERATES schema documents from your actual database
   2. Converts them to vectors using Amazon Titan Embeddings V2
-  3. Stores vectors in an in-memory ChromaDB (local, free)
-  4. At query time: finds the most relevant schemas before SQL generation
+  3. Stores vectors in ChromaDB (local, free)
+  4. At query time: finds most relevant schemas before SQL generation
   5. Injects relevant schema context into the agent prompt
 
-Why this matters:
-  - Agent knows EXACTLY which tables/columns are relevant before generating SQL
+Two modes:
+  - AUTO mode : reads schema directly from database (recommended)
+  - MANUAL mode: uses hardcoded SCHEMA_DOCUMENTS (fallback)
+
+Why RAG matters:
+  - Agent knows EXACTLY which tables/columns exist before generating SQL
   - Prevents hallucinated column names
-  - Works like enterprise Bedrock Knowledge Bases but locally free
+  - Works for any number of tables — 5 or 500
 """
 
 import boto3
@@ -20,20 +24,250 @@ import os
 import chromadb
 from chromadb.config import Settings
 from dotenv import load_dotenv
+from agent.database import get_connection
 
 load_dotenv()
 
 AWS_REGION  = os.getenv("AWS_REGION", "us-east-1")
 
-# Titan Embeddings V2 — free tier, 1536 dimensions
+# ── Titan Embeddings V2 ───────────────────────────────────────
+# Cost: ~$0.00011 per 1K tokens — extremely cheap
+# Dimensions: 512 — good balance of accuracy vs speed
 EMBED_MODEL = "amazon.titan-embed-text-v2:0"
 
-# In-memory ChromaDB — no extra setup needed
+# ── ChromaDB — Local In-Memory Vector Store ───────────────────
+# Free, no setup needed
+# Note: in-memory = rebuilt on every app restart
+# For production: use chromadb.PersistentClient(path="./chroma_db")
 _chroma_client     = chromadb.Client(Settings(anonymized_telemetry=False))
 _schema_collection = None
 
 
-# ── Schema documents — describes each table in plain English ──
+# ══════════════════════════════════════════════════════════════
+# AUTO SCHEMA GENERATION
+# Reads directly from database — works for any number of tables
+# ══════════════════════════════════════════════════════════════
+
+def auto_generate_schema_documents(username: str = "default_user") -> list:
+    """
+    Automatically generates schema documents by reading directly
+    from the database. Works for SQLite (POC) and Redshift (prod).
+
+    For each table it generates:
+      - Table name and purpose (inferred from name)
+      - All column names, types, nullable, primary key info
+      - Row count
+      - Foreign key relationships (JOIN keys)
+      - Common query patterns (inferred from column names)
+
+    Returns:
+        List of dicts with 'id' and 'content' keys
+        Ready to be embedded and stored in ChromaDB
+    """
+    try:
+        conn   = get_connection(username)
+        cursor = conn.cursor()
+
+        # ── Get all tables ────────────────────────────────────
+        cursor.execute("""
+            SELECT name FROM sqlite_master
+            WHERE type='table'
+            ORDER BY name
+        """)
+        # For Redshift replace with:
+        # SELECT table_name FROM information_schema.tables
+        # WHERE table_schema = 'public' ORDER BY table_name
+
+        tables = [row[0] for row in cursor.fetchall()]
+        print(f"📊 Found {len(tables)} tables to index...")
+
+        documents       = []
+        foreign_keys    = {}   # track FK relationships across tables
+
+        # ── First pass — collect FK info for all tables ───────
+        for table in tables:
+            cursor.execute(f"PRAGMA foreign_key_list({table})")
+            fks = cursor.fetchall()
+            if fks:
+                foreign_keys[table] = [
+                    {
+                        "from_col": fk["from"],
+                        "to_table": fk["table"],
+                        "to_col":   fk["to"],
+                    }
+                    for fk in fks
+                ]
+
+        # ── Second pass — build schema doc per table ─────────
+        for table in tables:
+
+            # Get column details
+            cursor.execute(f"PRAGMA table_info({table})")
+            columns = cursor.fetchall()
+
+            # Get row count
+            try:
+                cursor.execute(f"SELECT COUNT(*) as cnt FROM {table}")
+                row_count = cursor.fetchone()["cnt"]
+            except Exception:
+                row_count = 0
+
+            # Build column descriptions
+            col_lines  = []
+            pk_columns = []
+            for col in columns:
+                pk_flag      = " (PRIMARY KEY)" if col["pk"] else ""
+                null_flag    = "NOT NULL" if col["notnull"] else "NULLABLE"
+                default_flag = f", DEFAULT {col['dflt_value']}" if col["dflt_value"] else ""
+                col_lines.append(
+                    f"  - {col['name']:<20} {col['type']:<12} "
+                    f"{null_flag}{pk_flag}{default_flag}"
+                )
+                if col["pk"]:
+                    pk_columns.append(col["name"])
+
+            # Build FK relationship lines
+            fk_lines = []
+            if table in foreign_keys:
+                for fk in foreign_keys[table]:
+                    fk_lines.append(
+                        f"  - {table}.{fk['from_col']} "
+                        f"→ {fk['to_table']}.{fk['to_col']}"
+                    )
+
+            # Find reverse FKs (tables that reference this table)
+            reverse_fk_lines = []
+            for other_table, fks in foreign_keys.items():
+                for fk in fks:
+                    if fk["to_table"] == table:
+                        reverse_fk_lines.append(
+                            f"  - {other_table}.{fk['from_col']} "
+                            f"→ {table}.{fk['to_col']}"
+                        )
+
+            # Infer common query patterns from column names
+            col_names    = [col["name"].lower() for col in columns]
+            query_hints  = []
+
+            if any("date" in c or "time" in c for c in col_names):
+                query_hints.append("date range filters")
+            if any("status" in c or "state" in c for c in col_names):
+                query_hints.append("filter by status")
+            if any("amount" in c or "price" in c or "total" in c or "revenue" in c for c in col_names):
+                query_hints.append("revenue and financial aggregations")
+            if any("region" in c or "country" in c or "area" in c for c in col_names):
+                query_hints.append("geographic analysis")
+            if any("category" in c or "type" in c or "segment" in c for c in col_names):
+                query_hints.append("grouping and segmentation")
+            if any("name" in c for c in col_names):
+                query_hints.append("lookup by name")
+            if table in foreign_keys or table in [
+                fk["to_table"] for fks in foreign_keys.values() for fk in fks
+            ]:
+                query_hints.append("JOIN with related tables")
+
+            # ── Build the final document text ─────────────────
+            content_parts = [
+                f"Table: {table}",
+                f"Row count: {row_count:,}",
+                "",
+                "Columns:",
+            ]
+            content_parts.extend(col_lines)
+
+            if pk_columns:
+                content_parts.append(f"\nPrimary Key: {', '.join(pk_columns)}")
+
+            if fk_lines:
+                content_parts.append("\nForeign Keys (this table references):")
+                content_parts.extend(fk_lines)
+
+            if reverse_fk_lines:
+                content_parts.append("\nReferenced by (other tables JOIN here):")
+                content_parts.extend(reverse_fk_lines)
+
+            if query_hints:
+                content_parts.append(
+                    f"\nCommon query patterns: {', '.join(query_hints)}"
+                )
+
+            content = "\n".join(content_parts)
+
+            documents.append({
+                "id":      f"{table}_schema",
+                "content": content,
+            })
+
+            print(f"   ✅ {table} ({row_count:,} rows, {len(columns)} columns)")
+
+        # ── Also generate JOIN patterns document ──────────────
+        if len(tables) > 1:
+            join_doc = _generate_join_patterns_doc(tables, foreign_keys)
+            if join_doc:
+                documents.append(join_doc)
+                print(f"   ✅ join_patterns ({len(foreign_keys)} relationships)")
+
+        conn.close()
+        print(f"\n✅ Auto-generated {len(documents)} schema documents from {len(tables)} tables")
+        return documents
+
+    except Exception as e:
+        print(f"⚠️  Auto schema generation failed: {str(e)}")
+        print("   Falling back to manual SCHEMA_DOCUMENTS...")
+        return SCHEMA_DOCUMENTS
+
+
+def _generate_join_patterns_doc(tables: list, foreign_keys: dict) -> dict | None:
+    """
+    Auto-generates common JOIN patterns based on FK relationships.
+    """
+    if not foreign_keys:
+        return None
+
+    join_examples = []
+    join_count    = 0
+
+    for table, fks in foreign_keys.items():
+        for fk in fks:
+            if join_count >= 6:   # limit to 6 examples
+                break
+
+            ref_table = fk["to_table"]
+            from_col  = fk["from_col"]
+            to_col    = fk["to_col"]
+
+            # Generate table aliases (first letter of each table)
+            t_alias   = table[0]
+            ref_alias = ref_table[0]
+
+            join_examples.append(f"""
+{join_count + 1}. JOIN {table} with {ref_table}:
+   SELECT {t_alias}.*, {ref_alias}.*
+   FROM {table} {t_alias}
+   JOIN {ref_table} {ref_alias}
+   ON {t_alias}.{from_col} = {ref_alias}.{to_col}""")
+
+            join_count += 1
+
+    if not join_examples:
+        return None
+
+    content = "Common JOIN patterns for this database:\n"
+    content += "\n".join(join_examples)
+    content += "\n\nAlways use table aliases (e.g. o for orders, c for customers)"
+    content += "\nUse LEFT JOIN to include rows with no matching record in other table"
+
+    return {
+        "id":      "join_patterns",
+        "content": content,
+    }
+
+
+# ══════════════════════════════════════════════════════════════
+# MANUAL SCHEMA DOCUMENTS (Fallback / Override)
+# Used if auto-generation fails or you want custom descriptions
+# ══════════════════════════════════════════════════════════════
+
 SCHEMA_DOCUMENTS = [
     {
         "id":      "orders_schema",
@@ -82,7 +316,7 @@ Columns:
   - unit_price    (REAL)         : Current selling price
   - stock_qty     (INTEGER)      : Current inventory quantity
   - supplier      (TEXT)         : Supplier company name
-Common queries: products by category, price range, inventory levels, supplier lookup
+Common queries: products by category, price range, inventory levels
         """.strip()
     },
     {
@@ -109,18 +343,11 @@ Common JOIN patterns for this database:
    SELECT o.order_id, c.customer_name, o.total_amount, o.status
    FROM orders o JOIN customers c ON o.customer_id = c.customer_id
 
-2. Orders with returns (left join to include all orders):
+2. Orders with returns:
    SELECT o.order_id, o.total_amount, r.reason, r.refund_amount
    FROM orders o LEFT JOIN order_returns r ON o.order_id = r.order_id
 
-3. Full order details with customer and returns:
-   SELECT c.customer_name, o.product_name, o.total_amount,
-          o.status, r.reason
-   FROM orders o
-   JOIN customers c ON o.customer_id = c.customer_id
-   LEFT JOIN order_returns r ON o.order_id = r.order_id
-
-4. Revenue by customer segment:
+3. Revenue by customer segment:
    SELECT c.segment, SUM(o.total_amount) as revenue
    FROM orders o JOIN customers c ON o.customer_id = c.customer_id
    WHERE o.status = 'Completed'
@@ -130,17 +357,31 @@ Common JOIN patterns for this database:
 ]
 
 
+# ══════════════════════════════════════════════════════════════
+# CORE FUNCTIONS
+# ══════════════════════════════════════════════════════════════
+
 def _get_bedrock_client():
+    """Returns boto3 Bedrock runtime client."""
     return boto3.client("bedrock-runtime", region_name=AWS_REGION)
 
 
-def _embed_text(text: str) -> list[float]:
+def _embed_text(text: str) -> list:
     """
     Calls Amazon Titan Embeddings V2 to convert text to a vector.
-    Cost: ~$0.00011 per 1K tokens — extremely cheap.
+
+    Input:  Any text string
+    Output: List of 512 floats representing meaning of the text
+
+    Similar meanings → similar vectors → found together in search
+    Cost: ~$0.00011 per 1K tokens
     """
     client   = _get_bedrock_client()
-    body     = json.dumps({"inputText": text, "dimensions": 512, "normalize": True})
+    body     = json.dumps({
+        "inputText":  text,
+        "dimensions": 512,    # vector size — 512 is good balance
+        "normalize":  True,   # normalizes vector length for better similarity
+    })
     response = client.invoke_model(
         modelId     = EMBED_MODEL,
         body        = body,
@@ -151,55 +392,75 @@ def _embed_text(text: str) -> list[float]:
     return result["embedding"]
 
 
-def build_schema_index():
+def build_schema_index(use_auto: bool = True, username: str = "default_user"):
     """
     Builds the schema vector index using Titan Embeddings.
-    Call this once at app startup.
+    Called once at app startup via @st.cache_resource.
+
+    Args:
+        use_auto: If True — auto-generate from DB (recommended)
+                  If False — use manual SCHEMA_DOCUMENTS
+        username: DB user for connection
     """
     global _schema_collection
 
+    # ── Delete old index if exists (fresh start) ──────────────
     try:
         _chroma_client.delete_collection("schema_index")
     except Exception:
         pass
 
+    # ── Create fresh ChromaDB collection ─────────────────────
     _schema_collection = _chroma_client.create_collection(
         name     = "schema_index",
-        metadata = {"description": "Redshift table schemas"},
+        metadata = {"description": "Database table schemas"},
     )
 
-    print("🔵 Building schema index with Titan Embeddings...")
+    # ── Get schema documents ──────────────────────────────────
+    if use_auto:
+        print("🔵 Auto-generating schema documents from database...")
+        documents = auto_generate_schema_documents(username)
+    else:
+        print("🔵 Using manual SCHEMA_DOCUMENTS...")
+        documents = SCHEMA_DOCUMENTS
+
+    # ── Embed each document using Titan ───────────────────────
+    print("\n🔵 Building vector index with Titan Embeddings V2...")
     embeddings = []
-    documents  = []
+    documents_text = []
     ids        = []
 
-    for doc in SCHEMA_DOCUMENTS:
+    for doc in documents:
         print(f"   Embedding: {doc['id']}...")
         embedding = _embed_text(doc["content"])
         embeddings.append(embedding)
-        documents.append(doc["content"])
+        documents_text.append(doc["content"])
         ids.append(doc["id"])
 
+    # ── Store all in ChromaDB ─────────────────────────────────
     _schema_collection.add(
         embeddings = embeddings,
-        documents  = documents,
+        documents  = documents_text,
         ids        = ids,
     )
-    print(f"✅ Schema index built — {len(SCHEMA_DOCUMENTS)} documents indexed")
+
+    print(f"\n✅ Schema index ready — {len(documents)} documents indexed")
     return _schema_collection
 
 
 def retrieve_relevant_schema(query: str, top_k: int = 2) -> str:
     """
     Given a user query, finds the most relevant schema documents.
-    Returns schema context to inject into the agent prompt.
+    Injects them into the agent prompt before SQL generation.
 
     Args:
         query:  User's natural language question
-        top_k:  Number of most relevant schemas to return
+        top_k:  Number of most relevant schemas to return (default 2)
+                Increase for complex multi-table queries
 
     Returns:
         Formatted string with relevant schema context
+        Empty string if index not built
     """
     global _schema_collection
 
@@ -207,7 +468,10 @@ def retrieve_relevant_schema(query: str, top_k: int = 2) -> str:
         return ""
 
     try:
+        # Convert query to vector using same Titan model
         query_embedding = _embed_text(query)
+
+        # Find top_k most similar schema documents
         results = _schema_collection.query(
             query_embeddings = [query_embedding],
             n_results        = top_k,
@@ -216,6 +480,7 @@ def retrieve_relevant_schema(query: str, top_k: int = 2) -> str:
         if not results["documents"] or not results["documents"][0]:
             return ""
 
+        # Format as context block for injection into prompt
         context  = "\n\n=== RELEVANT SCHEMA CONTEXT (from Knowledge Base) ===\n"
         for i, doc in enumerate(results["documents"][0]):
             context += f"\n[Schema {i+1}]\n{doc}\n"
@@ -228,9 +493,27 @@ def retrieve_relevant_schema(query: str, top_k: int = 2) -> str:
 
 
 def get_index_stats() -> dict:
-    """Returns stats about the schema index."""
+    """
+    Returns health stats about the schema index.
+    Used by app.py sidebar to show RAG status.
+    """
     global _schema_collection
     if _schema_collection is None:
         return {"status": "not built", "count": 0}
     count = _schema_collection.count()
-    return {"status": "ready", "count": count, "model": EMBED_MODEL}
+    return {
+        "status": "ready",
+        "count":  count,
+        "model":  EMBED_MODEL,
+    }
+
+
+def rebuild_index(username: str = "default_user"):
+    """
+    Force rebuilds the schema index.
+    Call this when new tables are added to the database.
+    """
+    global _schema_collection
+    _schema_collection = None
+    print("🔄 Rebuilding schema index...")
+    return build_schema_index(use_auto=True, username=username)
