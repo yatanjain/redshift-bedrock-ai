@@ -1796,132 +1796,6 @@ Reduce to exactly 5 examples per topic — choose the most distinct and represen
 
 **Article angle:** *"AWS quota limits you won't find in the docs — learned the hard way"*
 
-### Lesson 4 — 🐛 Python Version Conflict (3.9 vs 3.10+)
-
-**What went wrong:**
-Running code with Python 3.9 caused:
-```
-TypeError: unsupported operand type(s) for |: 'type' and 'NoneType'
-```
-
-**Why it happened:**
-The `dict | None` type hint syntax was introduced in Python 3.10. Python 3.9 doesn't support the `|` union operator for type hints.
-
-**The fix:**
-Changed all type hints:
-```python
-# ❌ Python 3.10+ only
-def get_guardrail_config() -> dict | None:
-def _embed_text(text: str) -> list[float]:
-def load_history(session_id: str) -> list[dict]:
-
-# ✅ Works on Python 3.9+
-def get_guardrail_config():
-def _embed_text(text: str) -> list:
-def load_history(session_id: str) -> list:
-```
-
-**Key learning:**
-> Always check Python version compatibility when using modern type hints. `X | Y` union syntax requires Python 3.10+. Use `Optional[X]` from `typing` for 3.9 compatibility, or just remove type hints for simplicity in POC code.
-
-**Article angle:** *"A one-character syntax difference broke my entire setup"*
-
----
-
-### Lesson 5 — 🐛 AWS Credentials Not Found Despite Being in .env
-
-**What went wrong:**
-`setup_bedrock.py` failed with:
-```
-❌ AWS credentials not found: Unable to locate credentials
-```
-Even though `.env` file existed with keys filled in.
-
-**Why it happened:**
-The Secret Access Key had been accidentally placed in the Access Key ID field. The Access Key ID must start with `AKIA` and contain no slashes — the value ending with `//` was the Secret Key.
-
-**The fix:**
-Open the AWS credentials CSV file:
-```
-credentials/redshift-ai-user_accessKeys.csv
-```
-Carefully match each value to the correct variable:
-```env
-AWS_ACCESS_KEY_ID=AKIA...     ← starts with AKIA, no slashes
-AWS_SECRET_ACCESS_KEY=wJal... ← longer, CAN contain / and +
-```
-
-**Key learning:**
-> AWS Access Key ID always starts with `AKIA` and is exactly 20 characters with no special characters. If your key contains `/` or `+`, it's the Secret Key not the Access Key. Always verify with `python3 -c "import os; print(os.getenv('AWS_ACCESS_KEY_ID','')[:4])"` — should print `AKIA`.
-
-**Article angle:** *"I spent an hour debugging credentials — the keys were just in the wrong fields"*
-
----
-
-### Lesson 6 — 🐛 Virtual Environment Python Path Conflict
-
-**What went wrong:**
-After adding an alias to `.bashrc`, got:
-```
--bash: /home/ubuntu/redshift-bedrock-ai/venv/bin/python3: No such file or directory
-```
-Even after creating the venv — the alias pointed to a non-existent path.
-
-**Why it happened:**
-Added `alias python3="/path/to/venv/python3"` to `.bashrc` BEFORE the venv was actually created. Every subsequent command intercepted by the broken alias failed.
-
-**The fix:**
-```bash
-# Remove bad alias
-sed -i '/alias python3/d' ~/.bashrc
-unalias python3 2>/dev/null
-source ~/.bashrc
-
-# Install venv support first
-sudo apt install -y python3-full python3-venv
-
-# Then create venv
-python3 -m venv venv
-source venv/bin/activate
-```
-
-**Key learning:**
-> Never alias `python3` to a path inside venv before the venv exists. Instead add auto-activation to `.bashrc` using a safety check:
-> ```bash
-> if [ -f ~/project/venv/bin/activate ]; then
->     source ~/project/venv/bin/activate
-> fi
-> ```
-> The `if` check prevents broken activation if venv doesn't exist yet.
-
-**Article angle:** *"One line in .bashrc caused 30 minutes of debugging on EC2"*
-
----
-
-### Lesson 7 — 🐛 EC2 IP Changes on Every Restart
-
-**What went wrong:**
-After stopping and starting EC2, the app was unreachable. Browser showed connection refused.
-
-**Why it happened:**
-AWS assigns a new Public IPv4 address every time an EC2 instance is stopped and started. The old IP no longer points to your instance.
-
-**The fix:**
-Always get fresh IP from AWS Console after restart:
-```
-AWS Console → EC2 → Instances → Public IPv4 address
-```
-Then use new IP: `http://NEW_IP:8501`
-
-**Permanent fix:** Allocate an Elastic IP (free while instance is running).
-
-**Key learning:**
-> EC2 Public IPs are ephemeral by default. For any persistent app, use Elastic IP or a domain name. For POC/learning, just note the IP changes after every stop/start. Use Chrome not Safari — Safari aggressively caches old IPs and shows blank page.
-
-**Article angle:** *"My app disappeared after restarting EC2 — understanding ephemeral IPs"*
-
----
-
 ### Lesson 8 — 🐛 App Stops When Terminal Closes
 
 **What went wrong:**
@@ -1972,26 +1846,6 @@ sudo kill -9 PID
 
 ---
 
-### Lesson 10 — 🐛 .gitignore Named Without the Dot
-
-**What went wrong:**
-File was named `gitignore` instead of `.gitignore`. Git completely ignored it — `.env` and credentials were not protected.
-
-**Why it happened:**
-On Mac, files starting with `.` are hidden by default. When creating the file, the dot was accidentally omitted.
-
-**The fix:**
-```bash
-mv gitignore .gitignore
-```
-
-**Key learning:**
-> Git's ignore file MUST be named `.gitignore` with the leading dot. Always verify with `ls -la` (shows hidden files) not just `ls`. Before every `git push`, run `git status` and confirm `.env` and `credentials/` are not listed.
-
-**Article angle:** *"I almost pushed my AWS keys to GitHub — one missing dot"*
-
----
-
 ### Lesson 11 — 🐛 Schema Documents Only Showing 2 of 4 Tables in RAG
 
 **What went wrong:**
@@ -2008,24 +1862,71 @@ Combined with Lesson 1 fix — metadata queries bypass RAG entirely. For data qu
 
 ---
 
+
+---
+
+### Lesson 12 — 🐛 .env Updated on Mac But Not on EC2
+
+**What went wrong:**
+After recreating the Guardrail and getting a new ID, all queries were still blocked:
+```
+🛡️ Request blocked by security policy.
+```
+Even though the new guardrail was created correctly.
+
+**Why it happened:**
+`.env` was updated on Mac with the new `BEDROCK_GUARDRAIL_ID` but the EC2 instance has its own separate `.env` file — which still had the **old aggressive guardrail ID** pointing to v1.0.
+
+```
+Mac .env                    EC2 .env
+────────────────────        ────────────────────
+BEDROCK_GUARDRAIL_ID=new ✅  BEDROCK_GUARDRAIL_ID=old ❌
+                             ↑ App reads THIS one
+                             ↑ Still using old guardrail
+                             ↑ All queries blocked
+```
+
+**The fix:**
+```bash
+# On EC2 — update .env with new guardrail ID
+nano .env
+# BEDROCK_GUARDRAIL_ID=new_id_here
+
+# Restart app
+pkill -f streamlit
+streamlit run app.py --server.port 8501 --server.address 0.0.0.0
+```
+
+**Key learning:**
+> Mac and EC2 are two completely separate machines with separate `.env` files. Any change to `.env` on Mac must be **manually replicated** to EC2. This is why `.env` is never in GitHub — you must manage it on each machine separately.
+
+**Checklist for any .env change:**
+```
+□ Updated .env on Mac
+□ SSH into EC2
+□ Updated .env on EC2 (nano .env)
+□ Restarted app (pkill -f streamlit)
+□ Verified change took effect
+```
+
+**Article angle:** *"Two machines, two .env files — a lesson in environment management"*
+
+## 📊 Mistakes Summary Table
+
+---
+
 ## 📊 Mistakes Summary Table
 
 | # | Mistake | Root Cause | Fix | Lesson |
 |---|---|---|---|---|
-| 1 | RAG returned 2 tables instead of 4 | Partial context treated as complete | Bypass RAG for metadata queries | Label context as hints |
-| 2 | Model deprecated mid-project | Claude Haiku 3 retired | Use Claude Haiku 4.5 with `us.` prefix | Check model lifecycle |
-| 3 | Guardrail blocked valid queries | Policy too broad (off-topic rule) | Remove off-topic policy | Test guardrails with short queries |
+| 1 | RAG returned 2 tables instead of 4 | Partial context treated as complete | Bypass RAG for metadata queries | Label context as hints only |
+| 2 | Model deprecated mid-project | Claude Haiku 3 retired April 2026 | Use Claude Haiku 4.5 with `us.` prefix | Check model lifecycle before starting |
+| 3 | Guardrail blocked valid queries | off-topic policy too broad | Remove off-topic policy entirely | Test guardrails with short queries |
 | 3b | Guardrail creation failed | AWS limit = 5 examples per topic | Reduce to exactly 5 examples | Know AWS quota limits upfront |
-| 4 | Python 3.9 type hint error | `dict\|None` requires Python 3.10+ | Remove modern type hints | Check Python version |
-| 5 | AWS credentials not found | Keys in wrong fields | Match key format (AKIA prefix) | Verify key format |
-| 6 | venv path alias broke everything | Alias created before venv existed | Use safety check in .bashrc | Never alias non-existent paths |
-| 7 | App unreachable after EC2 restart | Ephemeral IP changed | Get fresh IP from console | Use Elastic IP for persistence |
-| 8 | App stopped when terminal closed | Foreground process killed with SSH | Use screen to detach | Always use screen |
-| 9 | Port 8501 conflict | Old process still running | pkill -f streamlit first | Add to startup checklist |
-| 10 | .gitignore not working | Missing leading dot in filename | Rename to `.gitignore` | Always use `ls -la` |
-| 11 | RAG still partial after auto-gen | top_k=2 too restrictive | Bypass RAG for metadata | Tune top_k per use case |
-
----
+| 4 | App stopped when terminal closed | Foreground process killed with SSH | Always use screen to detach | screen keeps app running permanently |
+| 5 | Port 8501 conflict on restart | Old process still occupying port | pkill -f streamlit before starting | Add to startup checklist |
+| 6 | RAG still showing partial tables | top_k=2 too restrictive for metadata | Bypass RAG for metadata queries | Tune top_k per use case |
+| 7 | Guardrail still blocking after fix | .env on EC2 not updated | Update .env on BOTH Mac and EC2 | Two machines = two separate .env files |
 
 ## 🎯 Article Writing Guide — Using These Lessons
 
@@ -2036,10 +1937,11 @@ Each lesson above is a potential article section. The most engaging ones for rea
 | ⭐⭐⭐ | RAG Hallucination (#1) | Never seen in other tutorials |
 | ⭐⭐⭐ | Model Deprecation (#2) | Happens to everyone on AWS |
 | ⭐⭐ | Guardrail too aggressive (#3) | Real security trade-off |
-| ⭐⭐ | Credentials in wrong fields (#5) | Embarrassing but relatable |
-| ⭐⭐ | .gitignore missing dot (#10) | Almost pushed AWS keys |
-| ⭐ | EC2 IP changes (#7) | Basic but often missed |
-| ⭐ | Screen for persistence (#8) | Every EC2 beginner hits this |
+| ⭐⭐ | Guardrail too aggressive (#3) | Real security trade-off |
+| ⭐⭐ | Guardrail quota limit (#3b) | AWS undocumented limits |
+| ⭐⭐ | .env not updated on EC2 (#7) | Every multi-machine project hits this |
+| ⭐ | App stops with terminal (#4) | Every EC2 beginner hits this |
+| ⭐ | Port 8501 conflict (#5) | Simple but blocks everyone |
 
 **Recommended article structure:**
 ```
