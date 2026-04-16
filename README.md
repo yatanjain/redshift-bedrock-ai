@@ -1742,7 +1742,163 @@ Update Guardrail with more specific examples and a clearer definition:
 
 ---
 
-### Lesson 3 — 🐛 EC2 IP Changes on Every Restart
+
+---
+
+### Lesson 3b — 🐛 Guardrail Creation Failed — AWS Example Quota
+
+**What went wrong:**
+Running `python3 setup_bedrock.py` after fixing the off-topic policy failed with:
+```
+ValidationException: Number of examples in topic policy exceeds quota limit
+```
+
+**Why it happened:**
+AWS Bedrock enforces a strict quota of **maximum 5 examples per topic policy**. The updated `block-ddl-dml` topic had 15 examples and `block-sql-injection` had 10 examples — both far exceeded the limit.
+
+**The fix:**
+Reduce to exactly 5 examples per topic — choose the most distinct and representative ones:
+
+```python
+# ❌ v2.0 — 15 examples (exceeds quota)
+"examples": [
+    "DROP TABLE orders",
+    "DROP TABLE orders CASCADE",
+    "DELETE FROM customers WHERE id = 1",
+    "DELETE all records from orders",
+    "INSERT INTO orders VALUES (1, 2, 3)",
+    "INSERT a new customer record",
+    "UPDATE products SET price = 100",
+    ... 8 more
+]
+
+# ✅ v2.1 — exactly 5 examples (within quota)
+"examples": [
+    "DROP TABLE orders",
+    "DELETE FROM customers WHERE id = 1",
+    "INSERT INTO orders VALUES (1, 2, 3)",
+    "UPDATE products SET price = 100",
+    "ALTER TABLE orders ADD COLUMN test TEXT",
+]
+```
+
+**Key learning:**
+> AWS Bedrock Guardrails has a hard limit of **5 examples per topic policy**. This is not clearly documented on the main page — you only discover it when creation fails. Always stay within 5 examples and make each one count by choosing the most distinct and representative case for each topic.
+
+**AWS Guardrail Limits Summary:**
+
+| Limit | Value |
+|---|---|
+| Max examples per topic | 5 |
+| Max topics per guardrail | 10 |
+| Max PII entities | 30 |
+| Max content filters | 6 |
+
+**Article angle:** *"AWS quota limits you won't find in the docs — learned the hard way"*
+
+### Lesson 4 — 🐛 Python Version Conflict (3.9 vs 3.10+)
+
+**What went wrong:**
+Running code with Python 3.9 caused:
+```
+TypeError: unsupported operand type(s) for |: 'type' and 'NoneType'
+```
+
+**Why it happened:**
+The `dict | None` type hint syntax was introduced in Python 3.10. Python 3.9 doesn't support the `|` union operator for type hints.
+
+**The fix:**
+Changed all type hints:
+```python
+# ❌ Python 3.10+ only
+def get_guardrail_config() -> dict | None:
+def _embed_text(text: str) -> list[float]:
+def load_history(session_id: str) -> list[dict]:
+
+# ✅ Works on Python 3.9+
+def get_guardrail_config():
+def _embed_text(text: str) -> list:
+def load_history(session_id: str) -> list:
+```
+
+**Key learning:**
+> Always check Python version compatibility when using modern type hints. `X | Y` union syntax requires Python 3.10+. Use `Optional[X]` from `typing` for 3.9 compatibility, or just remove type hints for simplicity in POC code.
+
+**Article angle:** *"A one-character syntax difference broke my entire setup"*
+
+---
+
+### Lesson 5 — 🐛 AWS Credentials Not Found Despite Being in .env
+
+**What went wrong:**
+`setup_bedrock.py` failed with:
+```
+❌ AWS credentials not found: Unable to locate credentials
+```
+Even though `.env` file existed with keys filled in.
+
+**Why it happened:**
+The Secret Access Key had been accidentally placed in the Access Key ID field. The Access Key ID must start with `AKIA` and contain no slashes — the value ending with `//` was the Secret Key.
+
+**The fix:**
+Open the AWS credentials CSV file:
+```
+credentials/redshift-ai-user_accessKeys.csv
+```
+Carefully match each value to the correct variable:
+```env
+AWS_ACCESS_KEY_ID=AKIA...     ← starts with AKIA, no slashes
+AWS_SECRET_ACCESS_KEY=wJal... ← longer, CAN contain / and +
+```
+
+**Key learning:**
+> AWS Access Key ID always starts with `AKIA` and is exactly 20 characters with no special characters. If your key contains `/` or `+`, it's the Secret Key not the Access Key. Always verify with `python3 -c "import os; print(os.getenv('AWS_ACCESS_KEY_ID','')[:4])"` — should print `AKIA`.
+
+**Article angle:** *"I spent an hour debugging credentials — the keys were just in the wrong fields"*
+
+---
+
+### Lesson 6 — 🐛 Virtual Environment Python Path Conflict
+
+**What went wrong:**
+After adding an alias to `.bashrc`, got:
+```
+-bash: /home/ubuntu/redshift-bedrock-ai/venv/bin/python3: No such file or directory
+```
+Even after creating the venv — the alias pointed to a non-existent path.
+
+**Why it happened:**
+Added `alias python3="/path/to/venv/python3"` to `.bashrc` BEFORE the venv was actually created. Every subsequent command intercepted by the broken alias failed.
+
+**The fix:**
+```bash
+# Remove bad alias
+sed -i '/alias python3/d' ~/.bashrc
+unalias python3 2>/dev/null
+source ~/.bashrc
+
+# Install venv support first
+sudo apt install -y python3-full python3-venv
+
+# Then create venv
+python3 -m venv venv
+source venv/bin/activate
+```
+
+**Key learning:**
+> Never alias `python3` to a path inside venv before the venv exists. Instead add auto-activation to `.bashrc` using a safety check:
+> ```bash
+> if [ -f ~/project/venv/bin/activate ]; then
+>     source ~/project/venv/bin/activate
+> fi
+> ```
+> The `if` check prevents broken activation if venv doesn't exist yet.
+
+**Article angle:** *"One line in .bashrc caused 30 minutes of debugging on EC2"*
+
+---
+
+### Lesson 7 — 🐛 EC2 IP Changes on Every Restart
 
 **What went wrong:**
 After stopping and starting EC2, the app was unreachable. Browser showed connection refused.
@@ -1766,7 +1922,7 @@ Then use new IP: `http://NEW_IP:8501`
 
 ---
 
-### Lesson 4 — 🐛 App Stops When Terminal Closes
+### Lesson 8 — 🐛 App Stops When Terminal Closes
 
 **What went wrong:**
 Closed the SSH terminal and the Streamlit app stopped. Browser showed connection refused.
@@ -1790,7 +1946,7 @@ streamlit run app.py --server.port 8501 --server.address 0.0.0.0
 
 ---
 
-### Lesson 5 — 🐛 Port 8501 Conflict on EC2 Restart
+### Lesson 9 — 🐛 Port 8501 Conflict on EC2 Restart
 
 **What went wrong:**
 After restarting the app, got error:
@@ -1816,7 +1972,27 @@ sudo kill -9 PID
 
 ---
 
-### Lesson 6— 🐛 Schema Documents Only Showing 2 of 4 Tables in RAG
+### Lesson 10 — 🐛 .gitignore Named Without the Dot
+
+**What went wrong:**
+File was named `gitignore` instead of `.gitignore`. Git completely ignored it — `.env` and credentials were not protected.
+
+**Why it happened:**
+On Mac, files starting with `.` are hidden by default. When creating the file, the dot was accidentally omitted.
+
+**The fix:**
+```bash
+mv gitignore .gitignore
+```
+
+**Key learning:**
+> Git's ignore file MUST be named `.gitignore` with the leading dot. Always verify with `ls -la` (shows hidden files) not just `ls`. Before every `git push`, run `git status` and confirm `.env` and `credentials/` are not listed.
+
+**Article angle:** *"I almost pushed my AWS keys to GitHub — one missing dot"*
+
+---
+
+### Lesson 11 — 🐛 Schema Documents Only Showing 2 of 4 Tables in RAG
 
 **What went wrong:**
 Auto schema generation was working but RAG was still only returning 2 schema documents for every query.
@@ -1837,11 +2013,17 @@ Combined with Lesson 1 fix — metadata queries bypass RAG entirely. For data qu
 | # | Mistake | Root Cause | Fix | Lesson |
 |---|---|---|---|---|
 | 1 | RAG returned 2 tables instead of 4 | Partial context treated as complete | Bypass RAG for metadata queries | Label context as hints |
-| 2 | Guardrail blocked valid queries | Policy too broad | Add specific examples to policy | Test with edge cases |
-| 3 | App unreachable after EC2 restart | Ephemeral IP changed | Get fresh IP from console | Use Elastic IP for persistence |
-| 4 | App stopped when terminal closed | Foreground process killed with SSH | Use screen to detach | Always use screen |
-| 5 | Port 8501 conflict | Old process still running | pkill -f streamlit first | Add to startup checklist |
-| 6 | RAG still partial after auto-gen | top_k=2 too restrictive | Bypass RAG for metadata | Tune top_k per use case |
+| 2 | Model deprecated mid-project | Claude Haiku 3 retired | Use Claude Haiku 4.5 with `us.` prefix | Check model lifecycle |
+| 3 | Guardrail blocked valid queries | Policy too broad (off-topic rule) | Remove off-topic policy | Test guardrails with short queries |
+| 3b | Guardrail creation failed | AWS limit = 5 examples per topic | Reduce to exactly 5 examples | Know AWS quota limits upfront |
+| 4 | Python 3.9 type hint error | `dict\|None` requires Python 3.10+ | Remove modern type hints | Check Python version |
+| 5 | AWS credentials not found | Keys in wrong fields | Match key format (AKIA prefix) | Verify key format |
+| 6 | venv path alias broke everything | Alias created before venv existed | Use safety check in .bashrc | Never alias non-existent paths |
+| 7 | App unreachable after EC2 restart | Ephemeral IP changed | Get fresh IP from console | Use Elastic IP for persistence |
+| 8 | App stopped when terminal closed | Foreground process killed with SSH | Use screen to detach | Always use screen |
+| 9 | Port 8501 conflict | Old process still running | pkill -f streamlit first | Add to startup checklist |
+| 10 | .gitignore not working | Missing leading dot in filename | Rename to `.gitignore` | Always use `ls -la` |
+| 11 | RAG still partial after auto-gen | top_k=2 too restrictive | Bypass RAG for metadata | Tune top_k per use case |
 
 ---
 
@@ -1854,6 +2036,8 @@ Each lesson above is a potential article section. The most engaging ones for rea
 | ⭐⭐⭐ | RAG Hallucination (#1) | Never seen in other tutorials |
 | ⭐⭐⭐ | Model Deprecation (#2) | Happens to everyone on AWS |
 | ⭐⭐ | Guardrail too aggressive (#3) | Real security trade-off |
+| ⭐⭐ | Credentials in wrong fields (#5) | Embarrassing but relatable |
+| ⭐⭐ | .gitignore missing dot (#10) | Almost pushed AWS keys |
 | ⭐ | EC2 IP changes (#7) | Basic but often missed |
 | ⭐ | Screen for persistence (#8) | Every EC2 beginner hits this |
 
