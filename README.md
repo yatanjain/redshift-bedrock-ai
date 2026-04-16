@@ -1496,3 +1496,503 @@ streamlit run app.py --server.port 8501 --server.address 0.0.0.0
 # Press Ctrl+A then D to detach
 ```
 
+
+---
+
+## 🟡 CONCEPT — The RAG Hallucination Bug (Real Story — Use in Article!)
+
+> 💡 **This is a concept/learning section** — documents a real bug we discovered and fixed during development. Great content for your article!
+
+---
+
+### What Happened
+
+During testing we asked: *"Show me all the tables I can access"*
+
+Expected response:
+```
+Available tables:
+  - customers
+  - order_returns
+  - orders
+  - products
+```
+
+Actual response from the agent:
+```
+Based on the schema context provided, here are the tables you can access:
+
+1. orders (15 rows)
+2. products (8 rows)
+
+These are the two main tables available in your database...
+```
+
+**The agent returned only 2 tables out of 4. This is a hallucination caused by RAG.**
+
+---
+
+### Root Cause Analysis
+
+```
+Step 1 — User asks: "Show me all tables I can access"
+                    ↓
+Step 2 — RAG retrieves top 2 most similar schema docs:
+         [orders_schema, products_schema]
+         (customers and order_returns not in top 2)
+                    ↓
+Step 3 — RAG injects into prompt:
+         "=== SCHEMA CONTEXT ===
+          Table: orders...
+          Table: products...
+          ==="
+                    ↓
+Step 4 — Claude reads schema context
+         Sees 2 tables described
+         ASSUMES these are all tables  ← BUG
+                    ↓
+Step 5 — Claude answers FROM context
+         WITHOUT calling tool_get_all_tables  ← BUG
+                    ↓
+Step 6 — User gets wrong answer: only 2 tables
+```
+
+---
+
+### Why This is a Classic RAG Problem
+
+This is known as **"Context Anchoring Hallucination"** in RAG systems:
+
+```
+The model receives partial context
+        ↓
+Treats partial context as complete truth
+        ↓
+Answers from context without verifying
+        ↓
+Returns incomplete/wrong answer
+```
+
+It's especially dangerous in database assistants because:
+- Wrong table list = user doesn't know what data exists
+- Wrong column names = SQL fails silently
+- Partial schema = incomplete analysis
+
+---
+
+### The Fix — 3 Changes Applied
+
+**Fix 1 — System Prompt (agent.py)**
+```
+Added explicit rules:
+"Schema context is HINTS ONLY — not complete picture"
+"ALWAYS call tool_get_all_tables for table listing"
+"NEVER answer table questions from schema context"
+```
+
+**Fix 2 — Query Classifier (agent.py)**
+```python
+# Detect metadata queries and bypass RAG entirely
+METADATA_QUERY_KEYWORDS = [
+    "show all tables", "list tables", "what tables",
+    "all tables", "available tables", "how many tables",...
+]
+
+if _is_metadata_query(query):
+    use_rag = False   # skip RAG → go direct to tool
+```
+
+**Fix 3 — Context Label (agent.py)**
+```python
+# Label RAG context explicitly as hints
+enriched_query = (
+    f"{schema_context}\n"
+    f"NOTE: Schema context above shows HINTS only — "
+    f"not all tables. Always call tools for complete results.\n\n"
+    f"User question: {query}"
+)
+```
+
+---
+
+### Before vs After Fix
+
+| | Before Fix (v2.0) | After Fix (v2.1) |
+|---|---|---|
+| "Show all tables" | Returns 2 tables ❌ | Returns all 4 tables ✅ |
+| Source of answer | RAG context (partial) | tool_get_all_tables (complete) |
+| RAG for metadata | Always used | Bypassed for metadata queries |
+| Context label | Unlabeled | Explicitly labeled as hints |
+| Prompt guidance | Vague | Explicit tool-calling rules |
+
+---
+
+### Key Lesson for Article
+
+> **RAG is powerful but dangerous if not controlled carefully.**
+> Injecting context without guardrails causes the model to treat
+> partial information as complete truth — a subtle but critical bug
+> that's hard to spot without thorough testing.
+
+**This is the #1 lesson from building production RAG systems:**
+Always tell the model what the context IS and IS NOT.
+
+---
+
+### Article Section Suggestion
+
+This makes a perfect section in your article:
+
+> *"I discovered a critical RAG hallucination bug during testing —
+> here's what happened and how I fixed it"*
+
+Real bugs, real fixes, real learning = most engaging content. 🎯
+
+
+---
+
+## 📖 Lessons Learned — Real Mistakes & Fixes
+
+> 💡 **This section documents every real mistake, bug, and learning from building this project.**
+> These are invaluable for your article — readers love authentic problem-solving stories.
+> Each lesson is marked with what went wrong, why it happened, and how it was fixed.
+
+---
+
+### Lesson 1 — 🐛 RAG Hallucination (The Partial Context Bug)
+
+**What went wrong:**
+Asking *"Show me all tables"* returned only 2 tables instead of 4.
+
+**Why it happened:**
+RAG injected top 2 schema docs into the prompt. Claude treated partial context as complete truth and answered without calling `tool_get_all_tables`.
+
+**The fix:**
+- Added `_is_metadata_query()` to bypass RAG for table listing queries
+- Updated system prompt to explicitly say schema context = hints only
+- Labelled injected context as `NOTE: HINTS ONLY — not all tables`
+
+**Key learning:**
+> RAG context must always be labelled clearly. Never let the model assume partial context is complete. Always tell the model what the context IS and IS NOT.
+
+**Article angle:** *"I discovered a critical RAG hallucination bug — here's what happened"*
+
+---
+
+### Lesson 2 — 🐛 Claude Haiku 3 Model Deprecation
+
+**What went wrong:**
+Used model ID `anthropic.claude-3-haiku-20240307-v1:0` in the code. App failed with:
+```
+ValidationException: Invocation of model ID ... isn't supported
+```
+
+**Why it happened:**
+Claude Haiku 3 was deprecated and retired on April 19, 2026. The old direct model ID no longer works for on-demand inference.
+
+**The fix:**
+Switched to Claude Haiku 4.5 with cross-region inference profile:
+```
+# ❌ Old — retired
+anthropic.claude-3-haiku-20240307-v1:0
+
+# ✅ New — active + cross-region
+us.anthropic.claude-haiku-4-5-20251001-v1:0
+```
+
+**Key learning:**
+> Always check AWS Bedrock model lifecycle before starting a project. Models get deprecated and retired. The `us.` prefix is required for newer Claude models — it uses cross-region inference profiles instead of direct model IDs.
+
+**Article angle:** *"AWS deprecated the model mid-project — here's how I handled it"*
+
+---
+
+### Lesson 3 — 🐛 Guardrail Blocking Short Ambiguous Queries
+
+**What went wrong:**
+Typing *"just 2 tables?"* returned:
+```
+The response was blocked by security policy.
+Please rephrase your question about the database.
+```
+
+**Why it happened:**
+The `block-off-topic` Guardrail policy was too broad. Short ambiguous queries without clear database intent matched the off-topic pattern even when the user meant a database question.
+
+**The fix:**
+Update Guardrail with more specific examples and a clearer definition:
+```python
+{
+    "name": "block-off-topic",
+    "definition": "Requests completely unrelated to database exploration, SQL, or data analysis",
+    "examples": [
+        "Write me a poem",
+        "What is the weather",
+        "Tell me a joke",
+        "Help me cook dinner",
+        "What is the capital of France",
+    ]
+}
+```
+
+**Key learning:**
+> Guardrail policies need very specific examples. Vague definitions catch legitimate queries. Always test guardrails with edge cases — especially short, informal database questions users naturally type.
+
+**Article angle:** *"My security policy was too aggressive — it blocked legitimate database queries"*
+
+---
+
+### Lesson 4 — 🐛 Python Version Conflict (3.9 vs 3.10+)
+
+**What went wrong:**
+Running code with Python 3.9 caused:
+```
+TypeError: unsupported operand type(s) for |: 'type' and 'NoneType'
+```
+
+**Why it happened:**
+The `dict | None` type hint syntax was introduced in Python 3.10. Python 3.9 doesn't support the `|` union operator for type hints.
+
+**The fix:**
+Changed all type hints:
+```python
+# ❌ Python 3.10+ only
+def get_guardrail_config() -> dict | None:
+def _embed_text(text: str) -> list[float]:
+def load_history(session_id: str) -> list[dict]:
+
+# ✅ Works on Python 3.9+
+def get_guardrail_config():
+def _embed_text(text: str) -> list:
+def load_history(session_id: str) -> list:
+```
+
+**Key learning:**
+> Always check Python version compatibility when using modern type hints. `X | Y` union syntax requires Python 3.10+. Use `Optional[X]` from `typing` for 3.9 compatibility, or just remove type hints for simplicity in POC code.
+
+**Article angle:** *"A one-character syntax difference broke my entire setup"*
+
+---
+
+### Lesson 5 — 🐛 AWS Credentials Not Found Despite Being in .env
+
+**What went wrong:**
+`setup_bedrock.py` failed with:
+```
+❌ AWS credentials not found: Unable to locate credentials
+```
+Even though `.env` file existed with keys filled in.
+
+**Why it happened:**
+The Secret Access Key had been accidentally placed in the Access Key ID field. The Access Key ID must start with `AKIA` and contain no slashes — the value ending with `//` was the Secret Key.
+
+**The fix:**
+Open the AWS credentials CSV file:
+```
+credentials/redshift-ai-user_accessKeys.csv
+```
+Carefully match each value to the correct variable:
+```env
+AWS_ACCESS_KEY_ID=AKIA...     ← starts with AKIA, no slashes
+AWS_SECRET_ACCESS_KEY=wJal... ← longer, CAN contain / and +
+```
+
+**Key learning:**
+> AWS Access Key ID always starts with `AKIA` and is exactly 20 characters with no special characters. If your key contains `/` or `+`, it's the Secret Key not the Access Key. Always verify with `python3 -c "import os; print(os.getenv('AWS_ACCESS_KEY_ID','')[:4])"` — should print `AKIA`.
+
+**Article angle:** *"I spent an hour debugging credentials — the keys were just in the wrong fields"*
+
+---
+
+### Lesson 6 — 🐛 Virtual Environment Python Path Conflict
+
+**What went wrong:**
+After adding an alias to `.bashrc`, got:
+```
+-bash: /home/ubuntu/redshift-bedrock-ai/venv/bin/python3: No such file or directory
+```
+Even after creating the venv — the alias pointed to a non-existent path.
+
+**Why it happened:**
+Added `alias python3="/path/to/venv/python3"` to `.bashrc` BEFORE the venv was actually created. Every subsequent command intercepted by the broken alias failed.
+
+**The fix:**
+```bash
+# Remove bad alias
+sed -i '/alias python3/d' ~/.bashrc
+unalias python3 2>/dev/null
+source ~/.bashrc
+
+# Install venv support first
+sudo apt install -y python3-full python3-venv
+
+# Then create venv
+python3 -m venv venv
+source venv/bin/activate
+```
+
+**Key learning:**
+> Never alias `python3` to a path inside venv before the venv exists. Instead add auto-activation to `.bashrc` using a safety check:
+> ```bash
+> if [ -f ~/project/venv/bin/activate ]; then
+>     source ~/project/venv/bin/activate
+> fi
+> ```
+> The `if` check prevents broken activation if venv doesn't exist yet.
+
+**Article angle:** *"One line in .bashrc caused 30 minutes of debugging on EC2"*
+
+---
+
+### Lesson 7 — 🐛 EC2 IP Changes on Every Restart
+
+**What went wrong:**
+After stopping and starting EC2, the app was unreachable. Browser showed connection refused.
+
+**Why it happened:**
+AWS assigns a new Public IPv4 address every time an EC2 instance is stopped and started. The old IP no longer points to your instance.
+
+**The fix:**
+Always get fresh IP from AWS Console after restart:
+```
+AWS Console → EC2 → Instances → Public IPv4 address
+```
+Then use new IP: `http://NEW_IP:8501`
+
+**Permanent fix:** Allocate an Elastic IP (free while instance is running).
+
+**Key learning:**
+> EC2 Public IPs are ephemeral by default. For any persistent app, use Elastic IP or a domain name. For POC/learning, just note the IP changes after every stop/start. Use Chrome not Safari — Safari aggressively caches old IPs and shows blank page.
+
+**Article angle:** *"My app disappeared after restarting EC2 — understanding ephemeral IPs"*
+
+---
+
+### Lesson 8 — 🐛 App Stops When Terminal Closes
+
+**What went wrong:**
+Closed the SSH terminal and the Streamlit app stopped. Browser showed connection refused.
+
+**Why it happened:**
+Streamlit was running as a foreground process attached to the SSH session. When SSH disconnects, all child processes are killed.
+
+**The fix:**
+Always run inside `screen`:
+```bash
+screen -S redshift-ai
+streamlit run app.py --server.port 8501 --server.address 0.0.0.0
+# Press Ctrl+A then D to detach
+# App keeps running even after terminal closes
+```
+
+**Key learning:**
+> Any long-running process on EC2 must run inside `screen`, `tmux`, or as a `systemd` service. Direct terminal execution = process dies with SSH session. This is fundamental EC2/Linux knowledge every developer needs.
+
+**Article angle:** *"My app kept dying — understanding foreground vs background processes on EC2"*
+
+---
+
+### Lesson 9 — 🐛 Port 8501 Conflict on EC2 Restart
+
+**What went wrong:**
+After restarting the app, got error:
+```
+OSError: [Errno 98] Address already in use: port 8501
+```
+
+**Why it happened:**
+A previous Streamlit process was still running from an earlier session — occupying port 8501. Starting a new one caused a conflict.
+
+**The fix:**
+```bash
+# Always kill old process before starting new one
+pkill -f streamlit
+
+# Or find and kill by port
+sudo lsof -i :8501
+sudo kill -9 PID
+```
+
+**Key learning:**
+> Always run `pkill -f streamlit` before starting the app. Make it part of your startup checklist. This is why the session guide has it as Step 3 every time.
+
+---
+
+### Lesson 10 — 🐛 .gitignore Named Without the Dot
+
+**What went wrong:**
+File was named `gitignore` instead of `.gitignore`. Git completely ignored it — `.env` and credentials were not protected.
+
+**Why it happened:**
+On Mac, files starting with `.` are hidden by default. When creating the file, the dot was accidentally omitted.
+
+**The fix:**
+```bash
+mv gitignore .gitignore
+```
+
+**Key learning:**
+> Git's ignore file MUST be named `.gitignore` with the leading dot. Always verify with `ls -la` (shows hidden files) not just `ls`. Before every `git push`, run `git status` and confirm `.env` and `credentials/` are not listed.
+
+**Article angle:** *"I almost pushed my AWS keys to GitHub — one missing dot"*
+
+---
+
+### Lesson 11 — 🐛 Schema Documents Only Showing 2 of 4 Tables in RAG
+
+**What went wrong:**
+Auto schema generation was working but RAG was still only returning 2 schema documents for every query.
+
+**Why it happened:**
+`top_k=2` in `retrieve_relevant_schema()` — designed to limit context tokens — was too restrictive for table listing queries where ALL schemas need to be considered.
+
+**The fix:**
+Combined with Lesson 1 fix — metadata queries bypass RAG entirely. For data queries, `top_k=2` is correct since you only need the 2 most relevant schemas.
+
+**Key learning:**
+> `top_k` in RAG is a critical parameter. Too low = missing context. Too high = too many tokens, noisy context, higher cost. The sweet spot depends on the use case. For a database assistant: metadata queries need no RAG, data queries need top 2-3 relevant schemas.
+
+---
+
+## 📊 Mistakes Summary Table
+
+| # | Mistake | Root Cause | Fix | Lesson |
+|---|---|---|---|---|
+| 1 | RAG returned 2 tables instead of 4 | Partial context treated as complete | Bypass RAG for metadata queries | Label context as hints |
+| 2 | Model deprecated mid-project | Claude Haiku 3 retired | Use Claude Haiku 4.5 with `us.` prefix | Check model lifecycle |
+| 3 | Guardrail blocked valid queries | Policy too broad | Add specific examples to policy | Test with edge cases |
+| 4 | Python 3.9 type hint error | `dict\|None` requires Python 3.10+ | Remove modern type hints | Check Python version |
+| 5 | AWS credentials not found | Keys in wrong fields | Match key format (AKIA prefix) | Verify key format |
+| 6 | venv path alias broke everything | Alias created before venv existed | Use safety check in .bashrc | Never alias non-existent paths |
+| 7 | App unreachable after EC2 restart | Ephemeral IP changed | Get fresh IP from console | Use Elastic IP for persistence |
+| 8 | App stopped when terminal closed | Foreground process killed with SSH | Use screen to detach | Always use screen |
+| 9 | Port 8501 conflict | Old process still running | pkill -f streamlit first | Add to startup checklist |
+| 10 | .gitignore not working | Missing leading dot in filename | Rename to `.gitignore` | Always use `ls -la` |
+| 11 | RAG still partial after auto-gen | top_k=2 too restrictive | Bypass RAG for metadata | Tune top_k per use case |
+
+---
+
+## 🎯 Article Writing Guide — Using These Lessons
+
+Each lesson above is a potential article section. The most engaging ones for readers:
+
+| Priority | Lesson | Why Readers Love It |
+|---|---|---|
+| ⭐⭐⭐ | RAG Hallucination (#1) | Never seen in other tutorials |
+| ⭐⭐⭐ | Model Deprecation (#2) | Happens to everyone on AWS |
+| ⭐⭐ | Guardrail too aggressive (#3) | Real security trade-off |
+| ⭐⭐ | Credentials in wrong fields (#5) | Embarrassing but relatable |
+| ⭐⭐ | .gitignore missing dot (#10) | Almost pushed AWS keys |
+| ⭐ | EC2 IP changes (#7) | Basic but often missed |
+| ⭐ | Screen for persistence (#8) | Every EC2 beginner hits this |
+
+**Recommended article structure:**
+```
+1. Introduction — what I built and why
+2. Architecture — the 8 Bedrock features
+3. The RAG hallucination bug — most unique insight
+4. The model deprecation surprise — relatable AWS gotcha
+5. Lessons learned — honest reflection
+6. GitHub link + conclusion
+```
+
