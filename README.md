@@ -1968,6 +1968,68 @@ admin asks "show all tables"            → 5 tables (including employee_salarie
 
 **Article angle:** *"My RAG system was leaking sensitive schema to all users — here's the enterprise security fix"*
 
+
+---
+
+### Lesson 14 — 🐛 Changing DB_USER in .env Had No Effect on Running App
+
+**What went wrong:**
+Changed `DB_USER=admin` in `.env` on EC2 expecting to see 5 tables (including `employee_salaries`). App still showed only 4 tables even after saving `.env`.
+
+**Why it happened:**
+Two separate caching problems:
+
+**Problem 1 — `CURRENT_USER` was a module-level constant:**
+```python
+# ❌ Old — loaded ONCE when Python imports the module
+# Never re-reads .env after that
+CURRENT_USER = os.getenv("DB_USER", "default_user")
+```
+Even though `.env` changed, Python already loaded the old value into memory. It never re-reads `.env` unless the process restarts.
+
+**Problem 2 — RAG index was cached with `@st.cache_resource`:**
+```python
+# ❌ Old — cached forever for entire Streamlit session
+@st.cache_resource
+def init_rag():
+    db_user = os.getenv("DB_USER", "default_user")
+    return build_schema_index(username=db_user)
+# Once built for default_user, never rebuilt for admin
+```
+Even if the module-level constant was fixed, the RAG index was still cached for `default_user` and never rebuilt for `admin`.
+
+**The fix — Two changes:**
+
+Fix 1 — Dynamic user reading in `agent.py`:
+```python
+# ✅ New — reads .env fresh on every tool call
+def _get_current_user() -> str:
+    load_dotenv(override=True)   # forces .env re-read
+    return os.getenv("DB_USER", "default_user")
+```
+
+Fix 2 — Per-user RAG rebuild in `app.py`:
+```python
+# ✅ New — NOT cached, detects user change and rebuilds
+def init_rag_for_user(username: str):
+    return build_schema_index(use_auto=True, username=username)
+
+# Rebuilds when user changes
+if st.session_state.get("rag_user") != current_user:
+    init_rag_for_user(current_user)
+    st.session_state.rag_user = current_user
+```
+
+**Key learning:**
+> Two types of caching can silently break user-switching:
+> 1. **Module-level constants** — loaded once at import, never refreshed. Use functions that call `load_dotenv(override=True)` instead.
+> 2. **`@st.cache_resource`** — cached for entire Streamlit session. Never use it for anything user-specific. Use `st.session_state` with a user key to detect changes.
+
+**General rule:**
+> Anything that depends on `DB_USER` must be read dynamically, not cached statically.
+
+**Article angle:** *"Changing .env had no effect — understanding Python module caching and Streamlit resource caching"*
+
 ## 📊 Mistakes Summary Table
 
 ---
@@ -1985,6 +2047,7 @@ admin asks "show all tables"            → 5 tables (including employee_salarie
 | 6 | RAG still showing partial tables | top_k=2 too restrictive for metadata | Bypass RAG for metadata queries | Tune top_k per use case |
 | 7 | Guardrail still blocking after fix | .env on EC2 not updated | Update .env on BOTH Mac and EC2 | Two machines = two separate .env files |
 | 8 | RAG leaked restricted table schemas | Shared global index — no permission filter | Per-user index + permission check in tools | RAG index must respect user permissions |
+| 9 | DB_USER change had no effect | Module constant + Streamlit cache | Dynamic user read + per-user RAG rebuild | Never cache user-specific resources |
 
 ## 🎯 Article Writing Guide — Using These Lessons
 
@@ -2000,6 +2063,7 @@ Each lesson above is a potential article section. The most engaging ones for rea
 | ⭐⭐ | .env not updated on EC2 (#7) | Every multi-machine project hits this |
 | ⭐ | App stops with terminal (#4) | Every EC2 beginner hits this |
 | ⭐ | Port 8501 conflict (#5) | Simple but blocks everyone |
+| ⭐⭐ | DB_USER change had no effect (#9) | Caching bugs are invisible and tricky |
 
 **Recommended article structure:**
 ```
