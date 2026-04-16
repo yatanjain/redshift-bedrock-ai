@@ -49,7 +49,7 @@ with st.sidebar:
         st.warning("Disabled — run setup_bedrock.py")
 
     st.markdown("**🧠 Titan Embeddings + RAG**")
-    rag_stats = get_index_stats()
+    rag_stats = get_index_stats(username=os.getenv("DB_USER", "default_user"))
     if rag_stats["status"] == "ready":
         st.success(f"Ready — {rag_stats['count']} schemas indexed")
     else:
@@ -121,20 +121,36 @@ def get_agent():
     from agent.agent import build_agent
     return build_agent()
 
-@st.cache_resource
-def init_rag():
+def init_rag_for_user(username: str):
+    """
+    Builds RAG schema index for a specific user.
+    NOT cached with @st.cache_resource intentionally —
+    must rebuild when DB_USER changes in .env.
+    admin sees 5 tables, default_user sees 4 etc.
+    """
     from agent.knowledge_base import build_schema_index
-    return build_schema_index()
+    return build_schema_index(use_auto=True, username=username)
 
-if "agent_ready" not in st.session_state:
+# Read current user fresh from .env every render
+load_dotenv(override=True)
+current_user = os.getenv("DB_USER", "default_user")
+
+# Rebuild if: first load OR user changed since last load
+if (
+    "agent_ready" not in st.session_state
+    or st.session_state.get("rag_user") != current_user
+):
     with st.spinner("🔄 Connecting to AWS Bedrock and building schema index..."):
         try:
-            st.session_state.ai_agent = get_agent()
+            # Agent is cached — same for all users
+            if "ai_agent" not in st.session_state:
+                st.session_state.ai_agent = get_agent()
 
-            # Build RAG index
+            # RAG index — built per user, not cached
             try:
-                init_rag()
+                init_rag_for_user(current_user)
                 st.session_state.rag_ready = True
+                st.session_state.rag_user  = current_user
             except Exception as e:
                 st.session_state.rag_ready = False
                 st.warning(f"⚠️ Schema RAG unavailable: {str(e)}")
@@ -148,7 +164,7 @@ if "agent_ready" not in st.session_state:
             - Run `aws configure` or set `AWS_ACCESS_KEY_ID` in `.env`
             - Enable Claude Haiku 4.5 in Bedrock Model Catalog
             - Check `AWS_REGION=us-east-1` in `.env`
-            - Run `python setup_bedrock.py` first
+            - Run `python3 setup_bedrock.py` first
             """)
             st.stop()
 

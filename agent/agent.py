@@ -35,13 +35,17 @@ from agent.tools import (
     run_aggregation, explain_query, get_table_stats, search_schema,
 )
 from agent.guardrails     import get_guardrail_config
-from agent.knowledge_base import retrieve_relevant_schema, get_index_stats
+from agent.knowledge_base import retrieve_relevant_schema, get_index_stats, build_schema_index
 from agent.memory         import save_message, load_history, get_session_id
 from observability.logger import log_query, log_error, log_guardrail_block
 
 load_dotenv()
 
-CURRENT_USER          = os.getenv("DB_USER", "default_user")
+# CURRENT_USER loaded dynamically now — see _get_current_user()
+# This ensures .env changes take effect without restart
+def _get_current_user() -> str:
+    load_dotenv(override=True)   # re-read .env on every call
+    return os.getenv("DB_USER", "default_user")
 AWS_REGION            = os.getenv("AWS_REGION", "us-east-1")
 MODEL_ID              = os.getenv("BEDROCK_MODEL_ID", "us.anthropic.claude-haiku-4-5-20251001-v1:0")
 SYSTEM_PROMPT_VERSION = "v2.1"   # bumped — RAG hallucination fix
@@ -144,7 +148,7 @@ def tool_get_all_tables() -> str:
     'how many tables', 'which tables can I access'.
     NEVER answer table listing questions from schema context — always call this tool.
     """
-    return get_all_tables(CURRENT_USER)
+    return get_all_tables(_get_current_user())
 
 
 @tool
@@ -154,7 +158,7 @@ def tool_get_ddl(table_name: str) -> str:
     Shows all columns, data types, primary keys, and constraints.
     Use when user asks about table structure or schema.
     """
-    return get_ddl(table_name, CURRENT_USER)
+    return get_ddl(table_name, _get_current_user())
 
 
 @tool
@@ -163,13 +167,13 @@ def tool_get_record_count(table_name: str) -> str:
     Get the total number of records in a table.
     Use for: 'how many rows', 'how many records', 'size of table'.
     """
-    return get_record_count(table_name, CURRENT_USER)
+    return get_record_count(table_name, _get_current_user())
 
 
 @tool
 def tool_get_table_owner(table_name: str) -> str:
     """Get the owner of a specific table."""
-    return get_table_owner(table_name, CURRENT_USER)
+    return get_table_owner(table_name, _get_current_user())
 
 
 @tool
@@ -180,7 +184,7 @@ def tool_run_select(query: str) -> str:
     Results limited to 50 rows.
     Use for simple data fetch from one table.
     """
-    return run_select_query(query, CURRENT_USER)
+    return run_select_query(query, _get_current_user())
 
 
 @tool
@@ -189,7 +193,7 @@ def tool_get_column_info(table_name: str) -> str:
     Get detailed column metadata — names, types, nullable, defaults, primary keys.
     Use when user asks about columns in a specific table.
     """
-    return get_column_info(table_name, CURRENT_USER)
+    return get_column_info(table_name, _get_current_user())
 
 
 @tool
@@ -199,7 +203,7 @@ def tool_run_join(query: str) -> str:
     Use this when query involves JOIN across multiple tables.
     Always use table aliases in JOIN queries.
     """
-    return run_join_query(query, CURRENT_USER)
+    return run_join_query(query, _get_current_user())
 
 
 @tool
@@ -209,7 +213,7 @@ def tool_run_aggregation(query: str) -> str:
     Use for: 'total revenue', 'average order value', 'count by status',
     'group by region', any summary or analytics question.
     """
-    return run_aggregation(query, CURRENT_USER)
+    return run_aggregation(query, _get_current_user())
 
 
 @tool
@@ -218,7 +222,7 @@ def tool_explain_query(query: str) -> str:
     Show the execution plan for a SELECT query.
     Use when user asks how a query works or wants to optimize it.
     """
-    return explain_query(query, CURRENT_USER)
+    return explain_query(query, _get_current_user())
 
 
 @tool
@@ -227,7 +231,7 @@ def tool_get_table_stats(table_name: str) -> str:
     Get column-level statistics — min, max, avg, null counts.
     Use for data profiling and quality checks.
     """
-    return get_table_stats(table_name, CURRENT_USER)
+    return get_table_stats(table_name, _get_current_user())
 
 
 @tool
@@ -236,7 +240,7 @@ def tool_search_schema(keyword: str) -> str:
     Search for tables and columns containing a keyword.
     Use when user wants to find where certain data lives.
     """
-    return search_schema(keyword, CURRENT_USER)
+    return search_schema(keyword, _get_current_user())
 
 
 # ══════════════════════════════════════════════════════════════
@@ -346,7 +350,7 @@ def run_query(agent, query: str, session_id: str,
         # ── Features 3+4: RAG schema context injection ────────
         schema_context = ""
         if use_rag:
-            schema_context = retrieve_relevant_schema(query, top_k=2)
+            schema_context = retrieve_relevant_schema(query, username=_get_current_user(), top_k=2)
             if schema_context:
                 print(f"ℹ️  RAG: Injecting schema context as hints")
 
@@ -413,10 +417,10 @@ def run_interactive():
     print("=" * 65 + "\n")
 
     agent      = build_agent()
-    session_id = get_session_id(CURRENT_USER)
+    session_id = get_session_id(_get_current_user())
     print(f"Session: {session_id}\n")
 
-    stats   = get_index_stats()
+    stats   = get_index_stats(username=_get_current_user())
     use_rag = stats["status"] == "ready"
     if use_rag:
         print(f"✅ Schema RAG index ready ({stats['count']} documents)\n")
