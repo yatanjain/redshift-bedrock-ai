@@ -39,8 +39,13 @@ EMBED_MODEL = "amazon.titan-embed-text-v2:0"
 # Free, no setup needed
 # Note: in-memory = rebuilt on every app restart
 # For production: use chromadb.PersistentClient(path="./chroma_db")
-_chroma_client     = chromadb.Client(Settings(anonymized_telemetry=False))
-_schema_collection = None
+
+# ── Per-user schema collections ───────────────────────────────
+# Key: username, Value: ChromaDB collection
+# Each user gets their OWN index with ONLY their accessible tables
+# This prevents schema leakage across users
+_schema_collections = {}   # replaces single _schema_collection
+
 
 
 # ══════════════════════════════════════════════════════════════
@@ -69,16 +74,37 @@ def auto_generate_schema_documents(username: str = "default_user") -> list:
         cursor = conn.cursor()
 
         # ── Get all tables ────────────────────────────────────
+        # ── SQLITE POC (active) ───────────────────────────────
         cursor.execute("""
             SELECT name FROM sqlite_master
             WHERE type='table'
             ORDER BY name
         """)
-        # For Redshift replace with:
-        # SELECT table_name FROM information_schema.tables
-        # WHERE table_schema = 'public' ORDER BY table_name
+        # ── REDSHIFT EQUIVALENT (commented) ──────────────────
+        # Replace the SQLite query above with this for Redshift:
+        #
+        # cursor.execute("""
+        #     SELECT table_name as name
+        #     FROM information_schema.tables
+        #     WHERE table_schema = 'public'
+        #     ORDER BY table_name
+        # """)
+        #
+        # Why this works automatically:
+        #   Connecting AS the actual user means Redshift returns
+        #   ONLY tables this user has SELECT permission on.
+        #   Per-user RAG index becomes permission-scoped automatically!
+        #   No USER_PERMISSIONS dict or manual filtering needed.
+        # ──────────────────────────────────────────────────────
 
-        tables = [row[0] for row in cursor.fetchall()]
+        all_tables = [row[0] for row in cursor.fetchall()]
+
+        # ── SQLite POC — filter by user permissions ───────────
+        # DELETE this filtering block for Redshift
+        # Redshift automatically returns only accessible tables
+        from agent.database import get_allowed_tables
+        allowed_lower = [t.lower() for t in get_allowed_tables(username)]
+        tables = [t for t in all_tables if t.lower() in allowed_lower]
         print(f"📊 Found {len(tables)} tables to index...")
 
         documents       = []
@@ -388,47 +414,65 @@ def _embed_text(text: str) -> list:
         contentType = "application/json",
         accept      = "application/json",
     )
-    result = json.loads(response["body"].read())
-    return result["embedding"]
 
+
+# ══════════════════════════════════════════════════════════════
+# CORE FUNCTIONS — Per-User Schema Index
+# ══════════════════════════════════════════════════════════════
 
 def build_schema_index(use_auto: bool = True, username: str = "default_user"):
     """
-    Builds the schema vector index using Titan Embeddings.
-    Called once at app startup via @st.cache_resource.
+    Builds a PER-USER schema vector index using Titan Embeddings.
+
+    Key change from v1:
+      - Each user gets their OWN ChromaDB collection
+      - Only tables the user has permission to access are indexed
+      - User A cannot see schemas for tables they can't query
+      - Prevents schema leakage between users
 
     Args:
-        use_auto: If True — auto-generate from DB (recommended)
-                  If False — use manual SCHEMA_DOCUMENTS
-        username: DB user for connection
+        use_auto: True = auto-generate from DB, False = use SCHEMA_DOCUMENTS
+        username: Build index for this specific user
     """
-    global _schema_collection
+    global _schema_collections
 
-    # ── Delete old index if exists (fresh start) ──────────────
+    collection_name = f"schema_index_{username}"
+
+    # Delete old collection for this user if exists
     try:
-        _chroma_client.delete_collection("schema_index")
+        _chroma_client.delete_collection(collection_name)
     except Exception:
         pass
 
-    # ── Create fresh ChromaDB collection ─────────────────────
-    _schema_collection = _chroma_client.create_collection(
-        name     = "schema_index",
-        metadata = {"description": "Database table schemas"},
+    # Create fresh collection for this user
+    collection = _chroma_client.create_collection(
+        name     = collection_name,
+        metadata = {
+            "description": f"Schema index for user: {username}",
+            "username":    username,
+        },
     )
 
-    # ── Get schema documents ──────────────────────────────────
+    # Get schema documents — filtered by user permissions
     if use_auto:
-        print("🔵 Auto-generating schema documents from database...")
+        print(f"🔵 Auto-generating schema for user: {username}...")
         documents = auto_generate_schema_documents(username)
     else:
-        print("🔵 Using manual SCHEMA_DOCUMENTS...")
-        documents = SCHEMA_DOCUMENTS
+        print(f"🔵 Using manual SCHEMA_DOCUMENTS for user: {username}...")
+        # Filter manual docs to only allowed tables
+        from agent.database import get_allowed_tables
+        allowed = [t.lower() for t in get_allowed_tables(username)]
+        documents = [
+            doc for doc in SCHEMA_DOCUMENTS
+            if any(t in doc["id"].lower() for t in allowed)
+            or doc["id"] == "join_patterns"
+        ]
 
-    # ── Embed each document using Titan ───────────────────────
-    print("\n🔵 Building vector index with Titan Embeddings V2...")
-    embeddings = []
+    # Embed each document
+    print(f"\n🔵 Building vector index with Titan Embeddings V2...")
+    embeddings     = []
     documents_text = []
-    ids        = []
+    ids            = []
 
     for doc in documents:
         print(f"   Embedding: {doc['id']}...")
@@ -437,50 +481,47 @@ def build_schema_index(use_auto: bool = True, username: str = "default_user"):
         documents_text.append(doc["content"])
         ids.append(doc["id"])
 
-    # ── Store all in ChromaDB ─────────────────────────────────
-    _schema_collection.add(
+    # Store in user-specific ChromaDB collection
+    collection.add(
         embeddings = embeddings,
         documents  = documents_text,
         ids        = ids,
     )
 
-    print(f"\n✅ Schema index ready — {len(documents)} documents indexed")
-    return _schema_collection
+    # Store in per-user dict
+    _schema_collections[username] = collection
+
+    print(f"\n✅ Schema index ready for '{username}' — {len(documents)} docs indexed")
+    return collection
 
 
-def retrieve_relevant_schema(query: str, top_k: int = 2) -> str:
+def retrieve_relevant_schema(query: str, username: str = "default_user",
+                              top_k: int = 2) -> str:
     """
-    Given a user query, finds the most relevant schema documents.
-    Injects them into the agent prompt before SQL generation.
+    Finds most relevant schema documents for this user's query.
+    Uses the user-specific index — only searches their accessible schemas.
 
     Args:
-        query:  User's natural language question
-        top_k:  Number of most relevant schemas to return (default 2)
-                Increase for complex multi-table queries
-
-    Returns:
-        Formatted string with relevant schema context
-        Empty string if index not built
+        query:    User's natural language question
+        username: Which user's index to search
+        top_k:    Number of most relevant schemas to return
     """
-    global _schema_collection
+    global _schema_collections
 
-    if _schema_collection is None:
+    collection = _schema_collections.get(username)
+    if collection is None:
         return ""
 
     try:
-        # Convert query to vector using same Titan model
         query_embedding = _embed_text(query)
-
-        # Find top_k most similar schema documents
-        results = _schema_collection.query(
+        results = collection.query(
             query_embeddings = [query_embedding],
-            n_results        = top_k,
+            n_results        = min(top_k, collection.count()),
         )
 
         if not results["documents"] or not results["documents"][0]:
             return ""
 
-        # Format as context block for injection into prompt
         context  = "\n\n=== RELEVANT SCHEMA CONTEXT (from Knowledge Base) ===\n"
         for i, doc in enumerate(results["documents"][0]):
             context += f"\n[Schema {i+1}]\n{doc}\n"
@@ -492,28 +533,25 @@ def retrieve_relevant_schema(query: str, top_k: int = 2) -> str:
         return ""
 
 
-def get_index_stats() -> dict:
-    """
-    Returns health stats about the schema index.
-    Used by app.py sidebar to show RAG status.
-    """
-    global _schema_collection
-    if _schema_collection is None:
+def get_index_stats(username: str = "default_user") -> dict:
+    """Returns health stats about this user's schema index."""
+    global _schema_collections
+    collection = _schema_collections.get(username)
+    if collection is None:
         return {"status": "not built", "count": 0}
-    count = _schema_collection.count()
+    count = collection.count()
     return {
-        "status": "ready",
-        "count":  count,
-        "model":  EMBED_MODEL,
+        "status":   "ready",
+        "count":    count,
+        "model":    EMBED_MODEL,
+        "username": username,
     }
 
 
 def rebuild_index(username: str = "default_user"):
-    """
-    Force rebuilds the schema index.
-    Call this when new tables are added to the database.
-    """
-    global _schema_collection
-    _schema_collection = None
-    print("🔄 Rebuilding schema index...")
+    """Force rebuilds the schema index for a user."""
+    global _schema_collections
+    if username in _schema_collections:
+        del _schema_collections[username]
+    print(f"🔄 Rebuilding schema index for user: {username}...")
     return build_schema_index(use_auto=True, username=username)

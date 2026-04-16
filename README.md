@@ -1911,6 +1911,63 @@ streamlit run app.py --server.port 8501 --server.address 0.0.0.0
 
 **Article angle:** *"Two machines, two .env files — a lesson in environment management"*
 
+
+---
+
+### Lesson 13 — 🐛 Schema Index Exposed Restricted Tables to All Users
+
+**What went wrong:**
+The original code built ONE shared schema index for ALL users using all tables in the database. This meant:
+- `default_user` could ask *"what tables exist?"* and see `employee_salaries` in the response
+- The RAG index was leaking restricted schema information across users
+- A user could learn about sensitive tables they have no permission to query
+
+**Why it happened:**
+```python
+# Original code — one global index, no permission filtering
+_schema_collection = None   # shared by everyone
+
+def build_schema_index():
+    cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    # ↑ Returns ALL tables — no permission check!
+    # employee_salaries indexed for everyone ❌
+```
+
+**The fix — Per-User Index:**
+```python
+# Fixed — separate index per user
+_schema_collections = {}   # keyed by username
+
+def build_schema_index(username: str):
+    allowed = get_allowed_tables(username)  # get permitted tables
+    documents = auto_generate_schema_documents(username)  # only allowed tables
+    collection = _chroma_client.create_collection(f"schema_index_{username}")
+    # Only indexes tables user can access ✅
+    _schema_collections[username] = collection
+```
+
+**Also added — Permission check in every tool:**
+```python
+def _check_permission(table_name: str, username: str):
+    allowed = get_allowed_tables(username)
+    if table_name not in allowed:
+        return f"❌ Access denied: table '{table_name}'"
+    return None   # allowed — proceed
+```
+
+**Validation — Test Table Added:**
+Added `employee_salaries` as a restricted table in SQLite to validate:
+```
+default_user asks "show all tables"     → 4 tables (no employee_salaries) ✅
+default_user asks "show employee_salaries DDL" → Access denied ✅
+admin asks "show all tables"            → 5 tables (including employee_salaries) ✅
+```
+
+**Key learning:**
+> RAG schema index must be built per-user with only their accessible tables. A shared global index is a security vulnerability — it leaks schema information to users who shouldn't know certain tables exist. In Redshift production this is handled automatically by connecting as the actual user. In SQLite POC it requires explicit permission simulation.
+
+**Article angle:** *"My RAG system was leaking sensitive schema to all users — here's the enterprise security fix"*
+
 ## 📊 Mistakes Summary Table
 
 ---
@@ -1927,6 +1984,7 @@ streamlit run app.py --server.port 8501 --server.address 0.0.0.0
 | 5 | Port 8501 conflict on restart | Old process still occupying port | pkill -f streamlit before starting | Add to startup checklist |
 | 6 | RAG still showing partial tables | top_k=2 too restrictive for metadata | Bypass RAG for metadata queries | Tune top_k per use case |
 | 7 | Guardrail still blocking after fix | .env on EC2 not updated | Update .env on BOTH Mac and EC2 | Two machines = two separate .env files |
+| 8 | RAG leaked restricted table schemas | Shared global index — no permission filter | Per-user index + permission check in tools | RAG index must respect user permissions |
 
 ## 🎯 Article Writing Guide — Using These Lessons
 
@@ -1951,5 +2009,330 @@ Each lesson above is a potential article section. The most engaging ones for rea
 4. The model deprecation surprise — relatable AWS gotcha
 5. Lessons learned — honest reflection
 6. GitHub link + conclusion
+```
+
+
+---
+
+## 🟡 CONCEPT — Per-User Schema Index & Permission Enforcement
+
+> 💡 **This is a concept section** — the actual implementation is in `agent/knowledge_base.py`, `agent/tools.py`, and `agent/database.py`
+
+---
+
+### The Enterprise Security Problem
+
+In a real enterprise database like Redshift:
+
+```
+Database has 100 tables
+  ├── orders, customers, products    ← Sales team can access
+  ├── employee_salaries, hr_records  ← HR only — restricted
+  └── finance_budgets, p&l_data      ← Finance only — restricted
+
+User A (Sales analyst):
+  Should see: orders, customers, products
+  Should NOT see: employee_salaries, hr_records, finance_budgets
+
+User B (HR manager):
+  Should see: employee_salaries, hr_records, orders
+  Should NOT see: finance_budgets, p&l_data
+```
+
+**Original code (v1) had a critical security flaw:**
+
+```
+Both users connect
+    ↓
+RAG indexes ALL 100 tables for EVERYONE
+    ↓
+User A asks: "what tables do I have access to?"
+    ↓
+Agent returns: employee_salaries, hr_records ← WRONG!
+User A can see restricted schema they shouldn't know exists
+```
+
+---
+
+### The Fix — Two Layers of Protection
+
+**Layer 1 — Schema Index (RAG) — Per User:**
+```python
+# Before fix — one shared index
+_schema_collection = None   # everyone sees same index
+
+# After fix — per user index
+_schema_collections = {}    # each user has own index
+# key = username, value = ChromaDB collection
+# Only tables user can access are indexed
+```
+
+**Layer 2 — Query Execution — Permission Check:**
+```python
+# Every tool now checks before executing
+def _check_permission(table_name: str, username: str):
+    allowed = get_allowed_tables(username)
+    if table_name not in allowed:
+        return f"❌ Access denied: You don't have permission to access '{table_name}'"
+    return None   # allowed
+```
+
+---
+
+### How It Works in Production Redshift
+
+In Redshift you don't need the permission dict at all — the database handles it natively:
+
+```python
+# Connect as actual user
+conn = psycopg2.connect(user=username, password=password, ...)
+
+# This query automatically returns ONLY tables this user can see
+cursor.execute("""
+    SELECT table_name
+    FROM information_schema.tables
+    WHERE table_schema = 'public'
+""")
+# Redshift filters by user permissions automatically!
+```
+
+The per-user RAG index works the same way — build it after connecting as the user and you automatically get only their accessible tables.
+
+---
+
+### Validating the Permission System
+
+**POC has 5 tables:**
+
+| Table | default_user | admin | analyst |
+|---|---|---|---|
+| orders | ✅ Yes | ✅ Yes | ✅ Yes |
+| customers | ✅ Yes | ✅ Yes | ❌ No |
+| products | ✅ Yes | ✅ Yes | ✅ Yes |
+| order_returns | ✅ Yes | ✅ Yes | ❌ No |
+| employee_salaries | ❌ **No** | ✅ Yes | ❌ No |
+
+**Test queries to validate:**
+```
+As default_user:
+  "Show me all tables"              → should show 4 tables (not employee_salaries)
+  "Show DDL for employee_salaries"  → should show access denied
+  "SELECT * FROM employee_salaries" → should show access denied
+
+As admin (change DB_USER=admin in .env):
+  "Show me all tables"              → should show all 5 tables
+  "Show DDL for employee_salaries"  → should work
+```
+
+
+---
+
+## 🔌 Switching to Real Redshift — Complete Migration Guide
+
+> ✅ **This is actual migration steps** — all Redshift code is already written and commented in the codebase. Just uncomment and activate.
+
+---
+
+### Overview — What Changes
+
+```
+SQLite POC (current)              Redshift Production
+────────────────────────          ──────────────────────────
+database.py:                      database.py:
+  get_connection() → SQLite   →     get_connection() → psycopg2
+  USER_PERMISSIONS dict       →     DELETE entirely
+  get_allowed_tables()        →     DELETE entirely
+
+tools.py:                         tools.py:
+  _check_permission()         →     DELETE entirely
+  Permission checks in tools  →     DELETE all permission blocks
+  SQLite queries (PRAGMA)     →     Replace with information_schema
+
+knowledge_base.py:                knowledge_base.py:
+  sqlite_master query         →     information_schema.tables query
+  (No other changes needed)
+
+Everything else:                  Everything else:
+  agent.py, app.py, guardrails    No changes needed at all!
+  memory.py, logger.py            Same code works with Redshift
+```
+
+---
+
+### Step 1 — Install Redshift Driver
+
+```bash
+pip install psycopg2-binary
+```
+
+Add to `requirements.txt`:
+```
+psycopg2-binary>=2.9.0
+```
+
+---
+
+### Step 2 — Update `.env`
+
+```env
+# Auth mode: sqlite | password | sso
+AUTH_MODE=password
+
+# Redshift connection
+REDSHIFT_HOST=your-cluster.us-east-1.redshift.amazonaws.com
+REDSHIFT_PORT=5439
+REDSHIFT_DBNAME=your_database
+REDSHIFT_PASSWORD=your_password
+
+# For SSO mode
+# AUTH_MODE=sso
+# REDSHIFT_CLUSTER_ID=your-cluster-name
+# AWS_REGION=us-east-1
+```
+
+---
+
+### Step 3 — Update `database.py`
+
+**3a. Replace `get_connection()` body:**
+
+```python
+# ACTIVATE THIS (currently commented in database.py)
+import psycopg2
+
+def get_connection(username: str, password: str = None):
+    return psycopg2.connect(
+        host     = os.getenv("REDSHIFT_HOST"),
+        port     = int(os.getenv("REDSHIFT_PORT", 5439)),
+        dbname   = os.getenv("REDSHIFT_DBNAME"),
+        user     = username,
+        password = password or os.getenv("REDSHIFT_PASSWORD")
+    )
+```
+
+**3b. Delete these — not needed in Redshift:**
+```python
+# DELETE these entirely from database.py
+USER_PERMISSIONS = {...}     # Redshift has native permissions
+DEFAULT_PERMISSIONS = [...]  # not needed
+def get_allowed_tables(): ...  # not needed
+```
+
+**3c. For SSO — use this instead (also in database.py):**
+```python
+# ACTIVATE THIS for corporate SSO environments
+import psycopg2
+import boto3
+
+def get_connection_sso(username: str):
+    client   = boto3.client("redshift", region_name=os.getenv("AWS_REGION"))
+    response = client.get_cluster_credentials(
+        DbUser            = username,
+        DbName            = os.getenv("REDSHIFT_DBNAME"),
+        ClusterIdentifier = os.getenv("REDSHIFT_CLUSTER_ID"),
+        DurationSeconds   = 3600,
+        AutoCreate        = False,
+    )
+    return psycopg2.connect(
+        host     = os.getenv("REDSHIFT_HOST"),
+        port     = int(os.getenv("REDSHIFT_PORT", 5439)),
+        dbname   = os.getenv("REDSHIFT_DBNAME"),
+        user     = response["DbUser"],
+        password = response["DbPassword"],
+    )
+```
+
+---
+
+### Step 4 — Update `tools.py`
+
+**Delete ALL permission code — Redshift handles it natively:**
+
+```python
+# DELETE from tools.py:
+from agent.database import get_connection, get_allowed_tables  # remove get_allowed_tables
+def _check_permission(): ...    # DELETE entire function
+err = _check_permission(...)    # DELETE all calls
+if err: return err              # DELETE all error returns
+allowed = get_allowed_tables()  # DELETE all these blocks
+allowed_lower = [...]           # DELETE
+# all the words/loop permission checks # DELETE
+```
+
+**Replace SQLite queries with Redshift equivalents** (already commented in each tool):
+
+| Tool | SQLite | Redshift |
+|---|---|---|
+| `get_all_tables` | `sqlite_master` | `information_schema.tables` |
+| `get_ddl` | `PRAGMA table_info()` | `information_schema.columns` |
+| `get_column_info` | `PRAGMA table_info()` | `information_schema.columns` |
+| `get_table_owner` | Simulated | `pg_tables.tableowner` |
+| `get_table_stats` | `PRAGMA table_info()` | `information_schema.columns` |
+| `explain_query` | `EXPLAIN QUERY PLAN` | `EXPLAIN` |
+
+---
+
+### Step 5 — Update `knowledge_base.py`
+
+Replace SQLite table discovery query (already commented in file):
+
+```python
+# ACTIVATE THIS for Redshift:
+cursor.execute("""
+    SELECT table_name as name
+    FROM information_schema.tables
+    WHERE table_schema = 'public'
+    ORDER BY table_name
+""")
+# Redshift returns ONLY tables this user can access automatically!
+# Per-user RAG index becomes permission-scoped with zero extra code
+```
+
+---
+
+### Why Redshift is Simpler Than SQLite POC
+
+```
+SQLite requires:                   Redshift gives you for free:
+  100+ lines permission code    →   0 lines permission code
+  USER_PERMISSIONS dict         →   GRANT/REVOKE SQL (DBA does once)
+  _check_permission() in tools  →   InsufficientPrivilege exception
+  Manual table filtering        →   information_schema auto-filters
+  Simulated access denied       →   Real DB-level access denied
+
+The more enterprise the DB, the LESS code you need!
+```
+
+---
+
+### Password Auth vs SSO — When to Use Which
+
+| | Password Auth | SSO / IAM |
+|---|---|---|
+| **Use when** | Dev, test, simple setups | Corporate, enterprise, production |
+| **Credential type** | Permanent password | Temporary token (1 hour) |
+| **Risk if leaked** | High — works forever | Low — expires automatically |
+| **Rotation** | Manual | Automatic |
+| **Setup complexity** | Simple | Moderate |
+| **Compliance** | Basic | Full audit trail |
+| **Integration** | Any environment | AWS IAM + Active Directory |
+
+---
+
+### Validation — How to Test Permissions on Redshift
+
+After switching to Redshift, validate permissions work:
+
+```sql
+-- As DBA — set up test permissions
+CREATE USER test_analyst PASSWORD 'xxx';
+GRANT SELECT ON orders   TO test_analyst;
+GRANT SELECT ON products TO test_analyst;
+-- DO NOT grant access to employee_salaries
+
+-- Test in app with DB_USER=test_analyst in .env
+-- "Show all tables"              → only orders, products shown ✅
+-- "Show employee_salaries DDL"   → permission denied ✅
+-- "SELECT * FROM employee_salaries" → permission denied ✅
 ```
 
