@@ -39,16 +39,18 @@ EMBED_MODEL = "amazon.titan-embed-text-v2:0"
 # Free, no setup needed
 # Note: in-memory = rebuilt on every app restart
 # For production: use chromadb.PersistentClient(path="./chroma_db")
+# For production: use chromadb.PersistentClient(path="./chroma_db")
+
+# ── ChromaDB client — single shared client ────────────────────
+# Collections are per-user (see _schema_collections below)
+_chroma_client = chromadb.Client(Settings(anonymized_telemetry=False))
 
 # ── Per-user schema collections ───────────────────────────────
 # Key: username, Value: ChromaDB collection
 # Each user gets their OWN index with ONLY their accessible tables
 # This prevents schema leakage across users
-_schema_collections = {}   # replaces single _schema_collection
+_schema_collections = {}
 
-
-
-# ══════════════════════════════════════════════════════════════
 # AUTO SCHEMA GENERATION
 # Reads directly from database — works for any number of tables
 # ══════════════════════════════════════════════════════════════
